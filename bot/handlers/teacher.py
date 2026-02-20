@@ -1,36 +1,129 @@
-﻿"""
+"""
 bot/handlers/teacher.py
 
-Teacher-only commands:
-  /teacher  â€” teacher panel
-  /pending  â€” see flags waiting for review
-  /atrisk   â€” see at-risk students
-  /broadcast â€” send reminders to all students with missing work
-  verify buttons â€” approve or deny flagged submissions
+Teacher-only commands and workflows:
+  /teacher     - teacher panel
+  /pending     - review flagged submissions
+  /atrisk      - at-risk learner list
+  /broadcast   - missing work reminder blast
+  /campaign    - create scheduled missing-work campaign
+  /campaigns   - list recent campaign jobs
+  /links       - learner deep-link generation
 """
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta
+
 from telegram import Update, Bot, InlineKeyboardMarkup
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
+
 from database.db import (
-    get_pending_flags, get_at_risk_students,
+    get_pending_flags,
+    get_at_risk_students,
     get_all_students_with_telegram,
-    get_missing_work, verify_flag,
-    get_student_by_telegram
+    get_missing_work,
+    verify_flag,
+    get_db,
+    create_campaign_job,
+    get_due_campaign_jobs,
+    claim_campaign_job,
+    complete_campaign_job,
+    fail_campaign_job,
+    list_campaign_jobs,
+    get_submission_evidence,
 )
-from bot.keyboards import verify_kb, broadcast_confirm_kb, back_kb
+from bot.keyboards import (
+    verify_kb,
+    broadcast_confirm_kb,
+    back_kb,
+    campaign_template_kb,
+    campaign_schedule_kb,
+)
 from config import TEACHER_TELEGRAM_ID, COURSE_NAME
 
-# â”€â”€ Guard: teacher only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+CAMPAIGN_TEMPLATES: dict[str, str] = {
+    "gentle": (
+        "Hi {first_name}, this is a friendly reminder that you currently have "
+        "{missing_count} missing assignment(s).\n\n"
+        "{missing_list}\n\n"
+        "Please submit what you can today. Open /start for details."
+    ),
+    "firm": (
+        "{first_name}, action needed: you have {missing_count} missing assignment(s).\n\n"
+        "{missing_list}\n\n"
+        "Submit as soon as possible to avoid grade impact. Open /start now."
+    ),
+    "exam": (
+        "Exam prep check-in for {first_name}:\n"
+        "You still have {missing_count} missing assignment(s).\n\n"
+        "{missing_list}\n\n"
+        "Clearing these will help your readiness. Open /start to plan next steps."
+    ),
+}
+
 
 def _is_teacher(telegram_id: str) -> bool:
     return str(telegram_id) == str(TEACHER_TELEGRAM_ID)
 
-async def _deny_access(update: Update):
-    await update.message.reply_text(
-        "â›” This command is for teachers only."
-    )
 
-# â”€â”€ /teacher â€” main panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+def _clear_campaign_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop("teacher_state", None)
+    context.user_data.pop("campaign_template_key", None)
+    context.user_data.pop("campaign_template_text", None)
+
+
+def _campaign_template_preview(template: str) -> str:
+    sample = template.format(
+        first_name="Learner",
+        missing_count=3,
+        missing_list="- Example Task 1\n- Example Task 2\n- Example Task 3",
+    )
+    return sample[:600]
+
+
+def _resolve_schedule(token: str) -> tuple[datetime, str]:
+    now = datetime.now()
+    if token == "now":
+        return now, "Send now"
+    if token == "30m":
+        return now + timedelta(minutes=30), "In 30 minutes"
+    if token == "2h":
+        return now + timedelta(hours=2), "In 2 hours"
+    if token == "tomorrow_0700":
+        run_at = (now + timedelta(days=1)).replace(
+            hour=7, minute=0, second=0, microsecond=0
+        )
+        return run_at, "Tomorrow 07:00"
+    return now, "Send now"
+
+
+def _render_campaign_message(
+    template: str, student: dict, missing: list[dict]
+) -> str:
+    first_name = (student.get("full_name") or "Student").split()[0]
+    missing_list = "\n".join(f"- {m['title']}" for m in missing[:12]) or "- none"
+    try:
+        text = template.format(
+            first_name=first_name,
+            full_name=student.get("full_name", "Student"),
+            missing_count=len(missing),
+            missing_list=missing_list,
+        )
+    except Exception:
+        text = (
+            f"{first_name}, you have {len(missing)} missing assignment(s):\n\n"
+            f"{missing_list}\n\nOpen /start for details."
+        )
+    return text[:3900]
+
+
+async def _deny_access(update: Update):
+    if update.message:
+        await update.message.reply_text("This command is for teachers only.")
+
 
 async def teacher_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_teacher(update.effective_user.id):
@@ -41,18 +134,19 @@ async def teacher_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     at_risk = get_at_risk_students()
 
     await update.message.reply_text(
-        f"ðŸ‘©â€ðŸ« *Teacher Panel â€” {COURSE_NAME}*\n\n"
-        f"ðŸš© Pending flags:      *{len(pending)}*\n"
-        f"âš ï¸ At-risk students: *{len(at_risk)}*\n\n"
+        f"*Teacher Panel - {COURSE_NAME}*\n\n"
+        f"Pending flags: *{len(pending)}*\n"
+        f"At-risk learners: *{len(at_risk)}*\n\n"
         "Commands:\n"
-        "/pending   â€” review flagged submissions\n"
-        "/atrisk    â€” list at-risk students\n"
-        "/broadcast â€” send missing-work reminders\n"
-        "/links     â€” generate registration links",
-        parse_mode="Markdown"
+        "/pending   - review flagged submissions\n"
+        "/atrisk    - list at-risk learners\n"
+        "/broadcast - send missing-work reminders now\n"
+        "/campaign  - schedule template campaign\n"
+        "/campaigns - recent campaign jobs\n"
+        "/links     - generate registration links",
+        parse_mode="Markdown",
     )
 
-# â”€â”€ /pending â€” flags waiting for review â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def pending_flags(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_teacher(update.effective_user.id):
@@ -61,27 +155,56 @@ async def pending_flags(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     flags = get_pending_flags()
     if not flags:
-        await update.message.reply_text("âœ… No pending flags â€” all clear!")
+        await update.message.reply_text("No pending flags.")
         return
 
-    await update.message.reply_text(
-        f"ðŸš© *{len(flags)} pending flag(s) to review:*",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"Pending verification items: {len(flags)}")
 
-    for f in flags:
-        await update.message.reply_text(
-            f"ðŸ‘¤ *{f['full_name']}*\n"
-            f"ðŸ“ {f['assignment_title']}\n"
-            f"ðŸ“š {f['course_name']}\n"
-            f"ðŸ• Flagged: {f['flagged_at'][:16] if f['flagged_at'] else 'â€”'}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(
-                verify_kb(f["student_id"], f["assignment_id"])
-            )
+    for item in flags:
+        details = (
+            f"Student: {item['full_name']}\n"
+            f"Assignment: {item['assignment_title']}\n"
+            f"Course: {item['course_name']}\n"
+            f"Flagged: {(item['flagged_at'] or '-')[:16]}"
+        )
+        if item.get("flag_note"):
+            details += f"\nNote: {item['flag_note']}"
+        if item.get("proof_uploaded_at"):
+            details += f"\nEvidence uploaded: {item['proof_uploaded_at'][:16]}"
+
+        markup = InlineKeyboardMarkup(
+            verify_kb(item["student_id"], item["assignment_id"])
         )
 
-# â”€â”€ /atrisk â€” students with many missing assignments â”€â”€â”€â”€â”€â”€
+        proof_file_id = item.get("proof_file_id")
+        proof_type = item.get("proof_file_type")
+        proof_caption = item.get("proof_caption")
+        if proof_caption:
+            details += f"\nProof caption: {proof_caption[:180]}"
+
+        if proof_file_id and proof_type == "photo":
+            try:
+                await update.message.reply_photo(
+                    photo=proof_file_id,
+                    caption=details,
+                    reply_markup=markup,
+                )
+                continue
+            except Exception as exc:
+                details += f"\n(Preview unavailable: {exc})"
+        elif proof_file_id and proof_type == "document":
+            try:
+                await update.message.reply_document(
+                    document=proof_file_id,
+                    caption=details,
+                    reply_markup=markup,
+                )
+                continue
+            except Exception as exc:
+                details += f"\n(Preview unavailable: {exc})"
+
+        await update.message.reply_text(details, reply_markup=markup)
+
 
 async def at_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_teacher(update.effective_user.id):
@@ -90,199 +213,278 @@ async def at_risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     students = get_at_risk_students()
     if not students:
-        await update.message.reply_text(
-            "âœ… No at-risk students â€” everyone is on track!"
-        )
+        await update.message.reply_text("No at-risk learners.")
         return
 
     lines = []
     for s in students:
         tg = f"@{s['telegram_id']}" if s["telegram_id"] else "not registered"
         lines.append(
-            f"âš ï¸ *{s['full_name']}*\n"
-            f"   Missing: {s['total_missing']} | Overall avg: {s['avg_all_pct']}%\n"
-            f"   Telegram: {tg}"
+            f"{s['full_name']}\n"
+            f"Missing: {s['total_missing']} | Overall: {s['avg_all_pct']}%\n"
+            f"Telegram: {tg}"
         )
 
     await update.message.reply_text(
-        f"âš ï¸ *At-Risk Students ({len(students)}):*\n\n"
-        + "\n\n".join(lines),
-        parse_mode="Markdown"
+        f"At-risk learners ({len(students)}):\n\n" + "\n\n".join(lines)
     )
 
-# â”€â”€ /broadcast â€” send reminders to all with missing work â”€â”€
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_teacher(update.effective_user.id):
         await _deny_access(update)
         return
 
-    students     = get_all_students_with_telegram()
-    needs_remind = [s for s in students if (s["total_missing"] or 0) > 0]
-
-    if not needs_remind:
-        await update.message.reply_text("âœ… No students have missing work!")
+    students = get_all_students_with_telegram()
+    targets = [s for s in students if (s.get("total_missing") or 0) > 0]
+    if not targets:
+        await update.message.reply_text("No learners have missing work.")
         return
 
-    context.user_data["broadcast_targets"] = needs_remind
+    context.user_data["broadcast_targets"] = targets
     await update.message.reply_text(
-        f"ðŸ“¢ *Broadcast Preview*\n\n"
-        f"Will send reminders to *{len(needs_remind)} students* with missing work:\n\n"
-        + "\n".join([
-            f"â€¢ {s['full_name']} ({s['total_missing']} missing)"
-            for s in needs_remind[:10]
-        ])
-        + (f"\n_...and {len(needs_remind)-10} more_" if len(needs_remind) > 10 else ""),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(broadcast_confirm_kb())
+        f"Broadcast preview:\n"
+        f"Will message {len(targets)} learner(s) with missing work.\n\n"
+        + "\n".join(
+            f"- {s['full_name']} ({s['total_missing']} missing)" for s in targets[:10]
+        )
+        + (f"\n...and {len(targets)-10} more." if len(targets) > 10 else ""),
+        reply_markup=InlineKeyboardMarkup(broadcast_confirm_kb()),
     )
 
-# â”€â”€ /links â€” generate personal registration links â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+async def campaign_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_teacher(update.effective_user.id):
+        await _deny_access(update)
+        return
+
+    _clear_campaign_state(context)
+    context.user_data["teacher_state"] = "awaiting_campaign_template"
+    await update.message.reply_text(
+        "Choose a campaign template:",
+        reply_markup=InlineKeyboardMarkup(campaign_template_kb()),
+    )
+
+
+async def campaign_jobs_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_teacher(update.effective_user.id):
+        await _deny_access(update)
+        return
+
+    jobs = list_campaign_jobs(15)
+    if not jobs:
+        await update.message.reply_text("No campaign jobs yet.")
+        return
+
+    lines = []
+    for job in jobs:
+        lines.append(
+            f"#{job['id']} {job['status']} | {job['template_key']} | "
+            f"{job['schedule_label'] or '-'} | run_at={job['run_at']} | "
+            f"sent={job['sent_count']}/{job['target_count']}"
+        )
+    await update.message.reply_text("Recent campaign jobs:\n\n" + "\n".join(lines))
+
 
 async def generate_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_teacher(update.effective_user.id):
         await _deny_access(update)
         return
 
-    from database.db import get_db
     with get_db() as conn:
         students = conn.execute(
             "SELECT lms_id, full_name, telegram_id FROM students ORDER BY full_name"
         ).fetchall()
 
-    # Get bot username dynamically
     bot_me = await context.bot.get_me()
     username = bot_me.username
-
     lines = []
-    for s in students:
-        status = "âœ… registered" if s["telegram_id"] else "â³ not yet"
+    for student in students:
+        status = "registered" if student["telegram_id"] else "not yet"
         lines.append(
-            f"*{s['full_name']}* ({status})\n"
-            f"`t.me/{username}?start={s['lms_id']}`"
+            f"{student['full_name']} ({status})\n"
+            f"t.me/{username}?start={student['lms_id']}"
         )
 
-    await update.message.reply_text(
-        "ðŸ”— *Personal Registration Links:*\n\n"
-        + "\n\n".join(lines),
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("Personal registration links:\n\n" + "\n\n".join(lines))
 
-# â”€â”€ Notify teacher when student flags a submission â”€â”€â”€â”€â”€â”€â”€â”€
 
-async def notify_teacher_of_flag(bot: Bot, student: dict, assignment_id: int) -> bool:
+async def notify_teacher_of_flag(
+    bot: Bot,
+    student: dict,
+    assignment_id: int,
+) -> bool:
     teacher_chat_id = str(TEACHER_TELEGRAM_ID or "").strip()
     if not teacher_chat_id or not teacher_chat_id.isdigit():
-        print("Could not notify teacher: TEACHER_TELEGRAM_ID is missing or invalid.")
+        print("Could not notify teacher: TEACHER_TELEGRAM_ID missing/invalid.")
         return False
 
-    from database.db import get_db
     with get_db() as conn:
         assignment = conn.execute(
             "SELECT title FROM assignments WHERE id = ?",
-            (assignment_id,)
+            (assignment_id,),
         ).fetchone()
 
     if not assignment:
         return False
 
+    proof = get_submission_evidence(student["id"], assignment_id) or {}
+    details = (
+        "New flag needs review\n\n"
+        f"Student: {student['full_name']}\n"
+        f"Assignment: {assignment['title']}"
+    )
+    if proof.get("proof_uploaded_at"):
+        details += f"\nEvidence uploaded: {proof['proof_uploaded_at'][:16]}"
+
+    markup = InlineKeyboardMarkup(verify_kb(student["id"], assignment_id))
+
     try:
-        await bot.send_message(
-            chat_id=int(teacher_chat_id),
-            text=(
-                f"New Flag - Needs Review\\n\\n"
-                f"Student: {student['full_name']}\\n"
-                f"Assignment: {assignment['title']}"
-            ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(
-                verify_kb(student["id"], assignment_id)
+        proof_file_id = proof.get("proof_file_id")
+        proof_type = proof.get("proof_file_type")
+
+        if proof_file_id and proof_type == "photo":
+            await bot.send_photo(
+                chat_id=int(teacher_chat_id),
+                photo=proof_file_id,
+                caption=details,
+                reply_markup=markup,
             )
-        )
-        return True
-    except BadRequest as e:
-        if "Chat not found" in str(e):
-            print(
-                "Could not notify teacher: chat not found. Open the bot in the "
-                "teacher account and send /start once."
+        elif proof_file_id and proof_type == "document":
+            await bot.send_document(
+                chat_id=int(teacher_chat_id),
+                document=proof_file_id,
+                caption=details,
+                reply_markup=markup,
             )
         else:
-            print(f"Could not notify teacher: {e}")
-    except Exception as e:
-        print(f"Could not notify teacher: {e}")
+            await bot.send_message(
+                chat_id=int(teacher_chat_id),
+                text=details,
+                reply_markup=markup,
+            )
+        return True
+    except BadRequest as exc:
+        if "Chat not found" in str(exc):
+            print(
+                "Could not notify teacher: chat not found. "
+                "Open bot in teacher account and send /start."
+            )
+        else:
+            print(f"Could not notify teacher: {exc}")
+    except Exception as exc:
+        print(f"Could not notify teacher: {exc}")
     return False
-async def handle_teacher_buttons(update: Update,
-                                  context: ContextTypes.DEFAULT_TYPE) -> bool:
-    query = update.callback_query
-    data  = query.data
 
-    # â”€â”€ Verify approve/deny â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+async def handle_teacher_text_input(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    if not _is_teacher(update.effective_user.id):
+        return False
+
+    if context.user_data.get("teacher_state") != "awaiting_campaign_custom":
+        return False
+
+    template_text = (update.message.text or "").strip()
+    if len(template_text) < 10:
+        await update.message.reply_text(
+            "Template is too short. Send at least 10 characters, or /campaign to restart."
+        )
+        return True
+
+    context.user_data["campaign_template_key"] = "custom"
+    context.user_data["campaign_template_text"] = template_text
+    context.user_data["teacher_state"] = "awaiting_campaign_schedule"
+
+    await update.message.reply_text(
+        "Custom template saved.\n\n"
+        "You can use placeholders:\n"
+        "{first_name}, {full_name}, {missing_count}, {missing_list}\n\n"
+        "Choose a schedule:",
+        reply_markup=InlineKeyboardMarkup(campaign_schedule_kb()),
+    )
+    return True
+
+
+async def handle_teacher_buttons(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    query = update.callback_query
+    data = query.data
+
     if data.startswith("verify_"):
         if not _is_teacher(query.from_user.id):
-            await query.answer("â›” Teacher only", show_alert=True)
+            await query.answer("Teacher only", show_alert=True)
             return True
 
-        parts      = data.split("_")   # verify_approve_sid_aid
-        action     = parts[1]          # "approve" or "deny"
+        parts = data.split("_")  # verify_approve_sid_aid
+        action = parts[1]
         student_id = int(parts[2])
-        assign_id  = int(parts[3])
-        approved   = action == "approve"
-        teacher    = query.from_user.first_name or "Teacher"
+        assignment_id = int(parts[3])
+        approved = action == "approve"
+        teacher_name = query.from_user.first_name or "Teacher"
 
         await query.answer()
-        success = verify_flag(student_id, assign_id, approved, teacher)
+        success = verify_flag(student_id, assignment_id, approved, teacher_name)
 
         if success:
-            # Get student's telegram_id to notify them
-            from database.db import get_db
             with get_db() as conn:
                 row = conn.execute(
-                    "SELECT telegram_id, full_name FROM students WHERE id = ?",
-                    (student_id,)
+                    "SELECT telegram_id FROM students WHERE id = ?",
+                    (student_id,),
                 ).fetchone()
 
-            assignment_title = query.message.text.split("ðŸ“")[1].split("\n")[0].strip() \
-                               if "ðŸ“" in query.message.text else "the assignment"
-
-            if approved:
-                status_text = "âœ… *Marked as Submitted*"
-                student_msg = f"âœ… Your teacher verified *{assignment_title}* as submitted! ðŸŽ‰"
-            else:
-                status_text = "âŒ *Marked as Still Missing*"
-                student_msg = (
-                    f"âŒ Your teacher couldn't find *{assignment_title}*.\n"
-                    "Please resubmit and flag again."
-                )
-
-            await query.edit_message_text(
-                query.message.text + f"\n\n{status_text}",
-                parse_mode="Markdown"
+            status_text = (
+                "Verification complete: marked submitted."
+                if approved else
+                "Verification complete: marked still missing."
             )
 
-            # Notify the student
+            try:
+                if query.message.photo or query.message.document:
+                    caption = (query.message.caption or "") + f"\n\n{status_text}"
+                    await query.edit_message_caption(caption=caption)
+                else:
+                    await query.edit_message_text(
+                        (query.message.text or "") + f"\n\n{status_text}"
+                    )
+            except Exception:
+                await query.message.reply_text(status_text)
+
             if row and row["telegram_id"]:
+                learner_text = (
+                    "Your teacher verified this as submitted."
+                    if approved else
+                    "Your teacher could not verify this yet. Please resubmit and flag again."
+                )
                 try:
                     await query._bot.send_message(
                         chat_id=row["telegram_id"],
-                        text=student_msg,
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(back_kb())
+                        text=learner_text,
+                        reply_markup=InlineKeyboardMarkup(back_kb()),
                     )
-                except Exception as e:
-                    print(f"âš ï¸  Could not notify student: {e}")
+                except Exception as exc:
+                    print(f"Could not notify learner: {exc}")
         else:
-            await query.edit_message_text(
-                query.message.text + "\n\nâš ï¸ Already processed."
-            )
+            try:
+                if query.message.photo or query.message.document:
+                    caption = (query.message.caption or "") + "\n\nAlready processed."
+                    await query.edit_message_caption(caption=caption)
+                else:
+                    await query.edit_message_text(
+                        (query.message.text or "") + "\n\nAlready processed."
+                    )
+            except Exception:
+                await query.message.reply_text("Already processed.")
         return True
 
-    # â”€â”€ Broadcast confirm â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if data == "broadcast_confirm":
         if not _is_teacher(query.from_user.id):
-            await query.answer("â›” Teacher only", show_alert=True)
+            await query.answer("Teacher only", show_alert=True)
             return True
 
-        await query.answer("ðŸ“¢ Sending...")
+        await query.answer("Sending...")
         targets = context.user_data.get("broadcast_targets", [])
         sent = 0
 
@@ -292,35 +494,145 @@ async def handle_teacher_buttons(update: Update,
             missing = get_missing_work(student["id"])
             if not missing:
                 continue
-            titles = "\n".join([f"  â€¢ {m['title']}" for m in missing])
+            titles = "\n".join(f"- {m['title']}" for m in missing[:12])
+            text = (
+                "Reminder: Missing Work\n\n"
+                f"Hi {student['full_name'].split()[0]}, "
+                f"you have {len(missing)} missing assignment(s):\n\n"
+                f"{titles}\n\n"
+                "Open /start to review and flag."
+            )
             try:
-                await query._bot.send_message(
-                    chat_id=student["telegram_id"],
-                    text=(
-                        f"ðŸ“¢ *Reminder â€” Missing Work*\n\n"
-                        f"Hi *{student['full_name'].split()[0]}*, "
-                        f"you have *{len(missing)} missing assignment(s)*:\n\n"
-                        f"{titles}\n\n"
-                        "Tap /start to check details."
-                    ),
-                    parse_mode="Markdown"
-                )
+                await query._bot.send_message(chat_id=student["telegram_id"], text=text)
                 sent += 1
-            except Exception as e:
-                print(f"âš ï¸  Could not message {student['full_name']}: {e}")
+            except Exception as exc:
+                print(f"Could not message {student['full_name']}: {exc}")
 
         context.user_data.pop("broadcast_targets", None)
-        await query.edit_message_text(
-            f"âœ… *Broadcast complete!*\n\nSent to {sent} student(s).",
-            parse_mode="Markdown"
-        )
+        await query.edit_message_text(f"Broadcast complete. Sent to {sent} learner(s).")
         return True
 
     if data == "broadcast_cancel":
         await query.answer()
         context.user_data.pop("broadcast_targets", None)
-        await query.edit_message_text("ðŸ“¢ Broadcast cancelled.")
+        await query.edit_message_text("Broadcast cancelled.")
+        return True
+
+    if data.startswith("campaign_tpl_"):
+        if not _is_teacher(query.from_user.id):
+            await query.answer("Teacher only", show_alert=True)
+            return True
+
+        await query.answer()
+        key = data.replace("campaign_tpl_", "", 1)
+        if key == "custom":
+            context.user_data["teacher_state"] = "awaiting_campaign_custom"
+            context.user_data["campaign_template_key"] = "custom"
+            await query.edit_message_text(
+                "Send your custom campaign template as a text message.\n\n"
+                "Placeholders: {first_name}, {full_name}, {missing_count}, {missing_list}"
+            )
+            return True
+
+        template = CAMPAIGN_TEMPLATES.get(key)
+        if not template:
+            await query.edit_message_text("Unknown template. Send /campaign and try again.")
+            return True
+
+        context.user_data["campaign_template_key"] = key
+        context.user_data["campaign_template_text"] = template
+        context.user_data["teacher_state"] = "awaiting_campaign_schedule"
+        await query.edit_message_text(
+            "Template selected.\n\nPreview:\n\n"
+            f"{_campaign_template_preview(template)}\n\n"
+            "Choose schedule:",
+            reply_markup=InlineKeyboardMarkup(campaign_schedule_kb()),
+        )
+        return True
+
+    if data.startswith("campaign_sched_"):
+        if not _is_teacher(query.from_user.id):
+            await query.answer("Teacher only", show_alert=True)
+            return True
+
+        await query.answer()
+        if context.user_data.get("teacher_state") != "awaiting_campaign_schedule":
+            await query.edit_message_text(
+                "No campaign template selected. Send /campaign to start."
+            )
+            return True
+
+        token = data.replace("campaign_sched_", "", 1)
+        run_at, label = _resolve_schedule(token)
+        template_key = context.user_data.get("campaign_template_key", "gentle")
+        template_text = context.user_data.get("campaign_template_text")
+        if not template_text:
+            template_text = CAMPAIGN_TEMPLATES.get(template_key, CAMPAIGN_TEMPLATES["gentle"])
+
+        job_id = create_campaign_job(
+            created_by=str(query.from_user.id),
+            template_key=template_key,
+            template_text=template_text,
+            run_at=run_at.strftime("%Y-%m-%d %H:%M:%S"),
+            schedule_label=label,
+        )
+        _clear_campaign_state(context)
+        await query.edit_message_text(
+            f"Campaign scheduled.\n"
+            f"Job ID: {job_id}\n"
+            f"Run at: {run_at.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Template: {template_key}"
+        )
+        return True
+
+    if data == "campaign_cancel":
+        if not _is_teacher(query.from_user.id):
+            await query.answer("Teacher only", show_alert=True)
+            return True
+        await query.answer()
+        _clear_campaign_state(context)
+        await query.edit_message_text("Campaign setup cancelled.")
         return True
 
     return False
 
+
+async def _execute_campaign_job(bot: Bot, job: dict) -> tuple[int, int]:
+    targets = get_all_students_with_telegram()
+    targets = [s for s in targets if (s.get("total_missing") or 0) > 0]
+
+    template_key = job.get("template_key") or "gentle"
+    template_text = job.get("template_text") or CAMPAIGN_TEMPLATES.get(
+        template_key, CAMPAIGN_TEMPLATES["gentle"]
+    )
+
+    sent = 0
+    for student in targets:
+        if not student.get("telegram_id"):
+            continue
+        missing = get_missing_work(student["id"])
+        if not missing:
+            continue
+
+        text = _render_campaign_message(template_text, student, missing)
+        try:
+            await bot.send_message(chat_id=student["telegram_id"], text=text)
+            sent += 1
+        except Exception as exc:
+            print(f"Campaign send failed for {student['full_name']}: {exc}")
+
+    return len(targets), sent
+
+
+async def campaign_worker(bot: Bot):
+    while True:
+        jobs = get_due_campaign_jobs()
+        for job in jobs:
+            if not claim_campaign_job(job["id"]):
+                continue
+            try:
+                target_count, sent_count = await _execute_campaign_job(bot, job)
+                complete_campaign_job(job["id"], target_count, sent_count)
+            except Exception as exc:
+                fail_campaign_job(job["id"], str(exc))
+        await asyncio.sleep(20)

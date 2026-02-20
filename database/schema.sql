@@ -63,6 +63,11 @@ CREATE TABLE IF NOT EXISTS submissions (
     flag_verified_at    TEXT,
     flag_verified_by    TEXT,
     submitted_at        TEXT,
+    proof_file_id       TEXT,
+    proof_file_type     TEXT
+                        CHECK (proof_file_type IN ('photo','document')),
+    proof_caption       TEXT,
+    proof_uploaded_at   TEXT,
     updated_at          TEXT    DEFAULT (datetime('now')),
     UNIQUE (student_id, assignment_id)
 );
@@ -94,12 +99,30 @@ CREATE TABLE IF NOT EXISTS sync_log (
     notes        TEXT
 );
 
+CREATE TABLE IF NOT EXISTS campaign_jobs (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_by     TEXT,
+    template_key   TEXT    NOT NULL,
+    template_text  TEXT,
+    run_at         TEXT    NOT NULL,
+    status         TEXT    NOT NULL DEFAULT 'pending'
+                   CHECK (status IN ('pending','running','completed','failed')),
+    target_count   INTEGER DEFAULT 0,
+    sent_count     INTEGER DEFAULT 0,
+    schedule_label TEXT,
+    error          TEXT,
+    started_at     TEXT,
+    finished_at    TEXT,
+    created_at     TEXT    DEFAULT (datetime('now'))
+);
+
 -- ── Indexes ───────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_submissions_student  ON submissions(student_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_status   ON submissions(status);
 CREATE INDEX IF NOT EXISTS idx_submissions_flagged  ON submissions(flagged_by_student);
 CREATE INDEX IF NOT EXISTS idx_assignments_course   ON assignments(course_id);
 CREATE INDEX IF NOT EXISTS idx_students_telegram    ON students(telegram_id);
+CREATE INDEX IF NOT EXISTS idx_campaign_jobs_due    ON campaign_jobs(status, run_at);
 
 -- ── Views ─────────────────────────────────────────────────
 CREATE VIEW IF NOT EXISTS v_missing_work AS
@@ -137,7 +160,9 @@ CREATE VIEW IF NOT EXISTS v_pending_flags AS
 SELECT s.full_name, s.telegram_id, s.id AS student_id,
        a.title AS assignment_title, a.id AS assignment_id,
        c.name  AS course_name,
-       sub.flagged_at, sub.flag_note
+       sub.flagged_at, sub.flag_note,
+       sub.proof_file_id, sub.proof_file_type,
+       sub.proof_caption, sub.proof_uploaded_at
 FROM   submissions sub
 JOIN   students    s  ON s.id  = sub.student_id
 JOIN   assignments a  ON a.id  = sub.assignment_id

@@ -19,7 +19,9 @@ from telegram.ext import (
 from bot.handlers.student import start, button_handler, message_handler
 from bot.handlers.teacher import (
     teacher_panel, pending_flags, at_risk,
-    broadcast, generate_links
+    broadcast, generate_links,
+    campaign_command, campaign_jobs_command,
+    campaign_worker,
 )
 from services.ai_service import ai_worker
 from database.db import init_db
@@ -42,6 +44,7 @@ async def post_init(app):
     """Runs once when bot starts"""
     init_db()
     asyncio.create_task(ai_worker())
+    asyncio.create_task(campaign_worker(app.bot))
     me = await app.bot.get_me()
     print(f"Bot running: @{me.username}")
     print(f"Link: t.me/{me.username}")
@@ -75,6 +78,8 @@ def main():
     app.add_handler(CommandHandler("pending",   pending_flags))
     app.add_handler(CommandHandler("atrisk",    at_risk))
     app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("campaign",  campaign_command))
+    app.add_handler(CommandHandler("campaigns", campaign_jobs_command))
     app.add_handler(CommandHandler("links",     generate_links))
 
     # â”€â”€ All button taps â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -83,6 +88,10 @@ def main():
     # â”€â”€ All free-text messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
+        message_handler
+    ))
+    app.add_handler(MessageHandler(
+        (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND,
         message_handler
     ))
 

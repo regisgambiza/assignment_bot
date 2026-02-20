@@ -11,6 +11,7 @@ def main_menu_kb(missing_count: int = 0) -> list:
         [InlineKeyboardButton("My Summary", callback_data="summary")],
         [InlineKeyboardButton("My Grades", callback_data="grades")],
         [InlineKeyboardButton(missing_label, callback_data="missing")],
+        [InlineKeyboardButton("Grade Projection", callback_data="projection")],
         [InlineKeyboardButton("Ask AI", callback_data="ask_ai")],
     ]
 
@@ -45,6 +46,16 @@ def missing_kb(missing: list[dict]) -> list:
 
 def back_kb() -> list:
     return [[InlineKeyboardButton("Back to Menu", callback_data="back")]]
+
+
+def flag_proof_kb(assignment_id: int) -> list:
+    return [[
+        InlineKeyboardButton(
+            "Skip Proof",
+            callback_data=f"proof_skip_{assignment_id}",
+        ),
+        InlineKeyboardButton("Back to Menu", callback_data="back"),
+    ]]
 
 
 def confirm_kb() -> list:
@@ -88,6 +99,26 @@ def broadcast_confirm_kb() -> list:
         InlineKeyboardButton("Yes, send now", callback_data="broadcast_confirm"),
         InlineKeyboardButton("Cancel", callback_data="broadcast_cancel"),
     ]]
+
+
+def campaign_template_kb() -> list:
+    return [
+        [InlineKeyboardButton("Gentle Reminder", callback_data="campaign_tpl_gentle")],
+        [InlineKeyboardButton("Firm Reminder", callback_data="campaign_tpl_firm")],
+        [InlineKeyboardButton("Exam Prep Nudge", callback_data="campaign_tpl_exam")],
+        [InlineKeyboardButton("Custom Template", callback_data="campaign_tpl_custom")],
+        [InlineKeyboardButton("Cancel", callback_data="campaign_cancel")],
+    ]
+
+
+def campaign_schedule_kb() -> list:
+    return [
+        [InlineKeyboardButton("Send Now", callback_data="campaign_sched_now")],
+        [InlineKeyboardButton("In 30 Minutes", callback_data="campaign_sched_30m")],
+        [InlineKeyboardButton("In 2 Hours", callback_data="campaign_sched_2h")],
+        [InlineKeyboardButton("Tomorrow 07:00", callback_data="campaign_sched_tomorrow_0700")],
+        [InlineKeyboardButton("Cancel", callback_data="campaign_cancel")],
+    ]
 
 
 def ai_followup_kb() -> list:

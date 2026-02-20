@@ -24,7 +24,25 @@ def init_db():
     schema = Path(__file__).parent / "schema.sql"
     with get_db() as conn:
         conn.executescript(schema.read_text())
+        _run_migrations(conn)
     print("Database initialized")
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(row["name"] == column for row in rows)
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    # Backfill proof columns for existing databases.
+    if not _column_exists(conn, "submissions", "proof_file_id"):
+        conn.execute("ALTER TABLE submissions ADD COLUMN proof_file_id TEXT")
+    if not _column_exists(conn, "submissions", "proof_file_type"):
+        conn.execute("ALTER TABLE submissions ADD COLUMN proof_file_type TEXT")
+    if not _column_exists(conn, "submissions", "proof_caption"):
+        conn.execute("ALTER TABLE submissions ADD COLUMN proof_caption TEXT")
+    if not _column_exists(conn, "submissions", "proof_uploaded_at"):
+        conn.execute("ALTER TABLE submissions ADD COLUMN proof_uploaded_at TEXT")
 
 # â”€â”€ Students â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -76,30 +94,34 @@ def link_student(lms_id: str, telegram_id: str,
 
 # â”€â”€ Submissions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-def get_missing_work(student_id: int) -> list[dict]:
+def get_missing_work(student_id: int, limit: int | None = None) -> list[dict]:
     with get_db() as conn:
-        rows = conn.execute(
-            """SELECT a.title, a.due_date, a.id AS assignment_id,
-                      sub.flagged_by_student
-               FROM   submissions sub
-               JOIN   assignments a ON a.id = sub.assignment_id
-               WHERE  sub.student_id = ? AND sub.status = 'Missing'
-               ORDER  BY a.created_at ASC""",
-            (student_id,)
-        ).fetchall()
+        sql = """SELECT a.title, a.due_date, a.id AS assignment_id,
+                        sub.flagged_by_student
+                 FROM   submissions sub
+                 JOIN   assignments a ON a.id = sub.assignment_id
+                 WHERE  sub.student_id = ? AND sub.status = 'Missing'
+                 ORDER  BY a.created_at ASC"""
+        params: tuple = (student_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (student_id, int(limit))
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
-def get_grades(student_id: int) -> list[dict]:
+def get_grades(student_id: int, limit: int | None = None) -> list[dict]:
     with get_db() as conn:
-        rows = conn.execute(
-            """SELECT a.title, a.due_date, a.id AS assignment_id,
-                      sub.status, sub.score_raw, sub.score_pct
-               FROM   submissions sub
-               JOIN   assignments a ON a.id = sub.assignment_id
-               WHERE  sub.student_id = ?
-               ORDER  BY a.created_at DESC""",
-            (student_id,)
-        ).fetchall()
+        sql = """SELECT a.title, a.due_date, a.id AS assignment_id,
+                        sub.status, sub.score_raw, sub.score_pct
+                 FROM   submissions sub
+                 JOIN   assignments a ON a.id = sub.assignment_id
+                 WHERE  sub.student_id = ?
+                 ORDER  BY a.created_at DESC"""
+        params: tuple = (student_id,)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (student_id, int(limit))
+        rows = conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -120,6 +142,128 @@ def get_submitted_work(student_id: int) -> list[dict]:
             (student_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+
+def get_student_work_filtered(
+    student_id: int,
+    title_contains: str | None = None,
+    due_from: str | None = None,
+    due_to: str | None = None,
+    limit: int = 50,
+) -> list[dict]:
+    with get_db() as conn:
+        sql = """
+            SELECT
+                a.id AS assignment_id,
+                a.title,
+                a.due_date,
+                COALESCE(sub.status, 'Missing') AS status,
+                sub.score_raw,
+                sub.score_pct
+            FROM assignments a
+            JOIN enrollments e
+              ON e.course_id = a.course_id
+             AND e.student_id = ?
+            LEFT JOIN submissions sub
+              ON sub.assignment_id = a.id
+             AND sub.student_id = ?
+            WHERE 1 = 1
+        """
+        params: list = [student_id, student_id]
+
+        if title_contains:
+            sql += " AND LOWER(a.title) LIKE LOWER(?)"
+            params.append(f"%{title_contains.strip()}%")
+
+        if due_from:
+            sql += " AND date(a.due_date) >= date(?)"
+            params.append(due_from)
+
+        if due_to:
+            sql += " AND date(a.due_date) <= date(?)"
+            params.append(due_to)
+
+        sql += (
+            " ORDER BY COALESCE(a.due_date, a.created_at) ASC, a.created_at ASC"
+            " LIMIT ?"
+        )
+        params.append(int(limit))
+
+        rows = conn.execute(sql, tuple(params)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_projection_snapshot(
+    student_id: int, course_id: int | None = None
+) -> dict | None:
+    with get_db() as conn:
+        resolved_course_id = course_id
+        if resolved_course_id is None:
+            enrollment = conn.execute(
+                """SELECT course_id
+                   FROM enrollments
+                   WHERE student_id = ?
+                   ORDER BY enrolled_at DESC
+                   LIMIT 1""",
+                (student_id,)
+            ).fetchone()
+            if not enrollment:
+                return None
+            resolved_course_id = enrollment["course_id"]
+
+        row = conn.execute(
+            """WITH course_assignments AS (
+                   SELECT
+                     a.id AS assignment_id,
+                     COALESCE(
+                       a.max_score,
+                       (
+                         SELECT MAX(s2.score_max)
+                         FROM submissions s2
+                         WHERE s2.assignment_id = a.id
+                           AND s2.score_max IS NOT NULL
+                       ),
+                       0
+                     ) AS possible_points
+                   FROM assignments a
+                   WHERE a.course_id = ?
+                 ),
+                 student_rows AS (
+                   SELECT
+                     ca.assignment_id,
+                     ca.possible_points,
+                     COALESCE(sub.score_points, 0) AS earned_points,
+                     COALESCE(sub.status, 'Missing') AS status
+                   FROM course_assignments ca
+                   LEFT JOIN submissions sub
+                     ON sub.assignment_id = ca.assignment_id
+                    AND sub.student_id    = ?
+                 )
+                 SELECT
+                   COUNT(*) AS total_assignments,
+                   SUM(earned_points) AS earned_points,
+                   SUM(possible_points) AS total_possible_points,
+                   SUM(
+                     CASE
+                       WHEN status = 'Missing' THEN possible_points
+                       ELSE 0
+                     END
+                   ) AS remaining_possible_points,
+                   SUM(
+                     CASE
+                       WHEN status = 'Missing' THEN 1
+                       ELSE 0
+                     END
+                   ) AS remaining_assignments
+                 FROM student_rows""",
+            (resolved_course_id, student_id)
+        ).fetchone()
+
+        if not row:
+            return None
+        data = dict(row)
+        data["course_id"] = resolved_course_id
+        return data
 
 def get_student_course_id(student_id: int) -> int | None:
     with get_db() as conn:
@@ -165,13 +309,53 @@ def flag_submission(student_id: int, assignment_id: int) -> bool:
         result = conn.execute(
             """UPDATE submissions
                SET flagged_by_student = 1,
-                   flagged_at         = datetime('now')
+                   flagged_at         = datetime('now'),
+                   proof_file_id      = NULL,
+                   proof_file_type    = NULL,
+                   proof_caption      = NULL,
+                   proof_uploaded_at  = NULL
                WHERE student_id   = ?
                AND   assignment_id = ?
                AND   status       = 'Missing'""",
             (student_id, assignment_id)
         )
         return result.rowcount > 0
+
+
+def add_submission_proof(
+    student_id: int,
+    assignment_id: int,
+    file_id: str,
+    file_type: str,
+    caption: str | None = None,
+) -> bool:
+    with get_db() as conn:
+        result = conn.execute(
+            """UPDATE submissions
+               SET proof_file_id     = ?,
+                   proof_file_type   = ?,
+                   proof_caption     = ?,
+                   proof_uploaded_at = datetime('now'),
+                   updated_at        = datetime('now')
+               WHERE student_id          = ?
+                 AND assignment_id       = ?
+                 AND flagged_by_student  = 1
+                 AND flag_verified       = 0""",
+            (file_id, file_type, caption, student_id, assignment_id)
+        )
+        return result.rowcount > 0
+
+
+def get_submission_evidence(student_id: int, assignment_id: int) -> dict | None:
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT proof_file_id, proof_file_type,
+                      proof_caption, proof_uploaded_at
+               FROM submissions
+               WHERE student_id = ? AND assignment_id = ?""",
+            (student_id, assignment_id)
+        ).fetchone()
+        return dict(row) if row else None
 
 def verify_flag(student_id: int, assignment_id: int,
                 approved: bool, teacher: str) -> bool:
@@ -213,7 +397,28 @@ def get_at_risk_students() -> list[dict]:
 
 def get_pending_flags() -> list[dict]:
     with get_db() as conn:
-        rows = conn.execute("SELECT * FROM v_pending_flags").fetchall()
+        rows = conn.execute(
+            """SELECT
+                 s.full_name,
+                 s.telegram_id,
+                 s.id AS student_id,
+                 a.title AS assignment_title,
+                 a.id AS assignment_id,
+                 c.name AS course_name,
+                 sub.flagged_at,
+                 sub.flag_note,
+                 sub.proof_file_id,
+                 sub.proof_file_type,
+                 sub.proof_caption,
+                 sub.proof_uploaded_at
+               FROM submissions sub
+               JOIN students    s ON s.id = sub.student_id
+               JOIN assignments a ON a.id = sub.assignment_id
+               JOIN courses     c ON c.id = a.course_id
+               WHERE sub.flagged_by_student = 1
+                 AND sub.flag_verified      = 0
+               ORDER BY sub.flagged_at ASC"""
+        ).fetchall()
         return [dict(r) for r in rows]
 
 def get_all_students_with_telegram() -> list[dict]:
@@ -228,6 +433,89 @@ def get_all_students_with_telegram() -> list[dict]:
                       ON cs.student_id = s.id
                      AND cs.course_id  = e.course_id
                WHERE s.telegram_id IS NOT NULL"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_campaign_job(
+    created_by: str,
+    template_key: str,
+    run_at: str,
+    schedule_label: str,
+    template_text: str | None = None,
+) -> int:
+    with get_db() as conn:
+        cursor = conn.execute(
+            """INSERT INTO campaign_jobs
+                 (created_by, template_key, template_text, run_at, schedule_label, status)
+               VALUES (?, ?, ?, ?, ?, 'pending')""",
+            (created_by, template_key, template_text, run_at, schedule_label)
+        )
+        return int(cursor.lastrowid)
+
+
+def get_due_campaign_jobs(now_ts: str | None = None) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT *
+               FROM campaign_jobs
+               WHERE status = 'pending'
+                 AND datetime(run_at) <= datetime(COALESCE(?, datetime('now')))
+               ORDER BY datetime(run_at) ASC, id ASC""",
+            (now_ts,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def claim_campaign_job(job_id: int) -> bool:
+    with get_db() as conn:
+        result = conn.execute(
+            """UPDATE campaign_jobs
+               SET status = 'running',
+                   started_at = datetime('now')
+               WHERE id = ?
+                 AND status = 'pending'""",
+            (job_id,)
+        )
+        return result.rowcount > 0
+
+
+def complete_campaign_job(job_id: int, target_count: int, sent_count: int) -> None:
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE campaign_jobs
+               SET status = 'completed',
+                   target_count = ?,
+                   sent_count = ?,
+                   finished_at = datetime('now'),
+                   error = NULL
+               WHERE id = ?""",
+            (target_count, sent_count, job_id)
+        )
+
+
+def fail_campaign_job(job_id: int, error: str) -> None:
+    with get_db() as conn:
+        conn.execute(
+            """UPDATE campaign_jobs
+               SET status = 'failed',
+                   finished_at = datetime('now'),
+                   error = ?
+               WHERE id = ?""",
+            (error[:500], job_id)
+        )
+
+
+def list_campaign_jobs(limit: int = 20) -> list[dict]:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT id, template_key, schedule_label, run_at,
+                      status, target_count, sent_count, created_at,
+                      finished_at, error
+               FROM campaign_jobs
+               ORDER BY id DESC
+               LIMIT ?""",
+            (int(limit),)
         ).fetchall()
         return [dict(r) for r in rows]
 
