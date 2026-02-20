@@ -102,14 +102,61 @@ def get_grades(student_id: int) -> list[dict]:
         ).fetchall()
         return [dict(r) for r in rows]
 
-def get_summary(student_id: int, course_id: int = 1) -> dict | None:
+
+def get_submitted_work(student_id: int) -> list[dict]:
     with get_db() as conn:
+        rows = conn.execute(
+            """SELECT a.title,
+                      a.due_date,
+                      a.id AS assignment_id,
+                      sub.status,
+                      sub.score_raw,
+                      sub.score_pct
+               FROM   submissions sub
+               JOIN   assignments a ON a.id = sub.assignment_id
+               WHERE  sub.student_id = ?
+                 AND  sub.status IN ('Submitted', 'Late', 'Graded')
+               ORDER  BY COALESCE(a.due_date, a.created_at) DESC, a.created_at DESC""",
+            (student_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+def get_student_course_id(student_id: int) -> int | None:
+    with get_db() as conn:
+        row = conn.execute(
+            """SELECT course_id
+               FROM enrollments
+               WHERE student_id = ?
+               ORDER BY enrolled_at DESC
+               LIMIT 1""",
+            (student_id,)
+        ).fetchone()
+        return int(row["course_id"]) if row else None
+
+
+def get_summary(student_id: int, course_id: int | None = None) -> dict | None:
+    with get_db() as conn:
+        resolved_course_id = course_id
+        if resolved_course_id is None:
+            enrollment = conn.execute(
+                """SELECT course_id
+                   FROM enrollments
+                   WHERE student_id = ?
+                   ORDER BY enrolled_at DESC
+                   LIMIT 1""",
+                (student_id,)
+            ).fetchone()
+            if not enrollment:
+                return None
+            resolved_course_id = enrollment["course_id"]
+
         row = conn.execute(
             """SELECT * FROM course_summaries
                WHERE student_id = ? AND course_id = ?""",
-            (student_id, course_id)
+            (student_id, resolved_course_id)
         ).fetchone()
         return dict(row) if row else None
+
 
 # â”€â”€ Flagging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -129,6 +176,9 @@ def flag_submission(student_id: int, assignment_id: int) -> bool:
 def verify_flag(student_id: int, assignment_id: int,
                 approved: bool, teacher: str) -> bool:
     new_status = "Submitted" if approved else "Missing"
+    updated = False
+    course_id = None
+
     with get_db() as conn:
         result = conn.execute(
             """UPDATE submissions
@@ -141,7 +191,18 @@ def verify_flag(student_id: int, assignment_id: int,
                AND   assignment_id = ?""",
             (new_status, teacher, student_id, assignment_id)
         )
-        return result.rowcount > 0
+        updated = result.rowcount > 0
+        if updated:
+            row = conn.execute(
+                "SELECT course_id FROM assignments WHERE id = ?",
+                (assignment_id,)
+            ).fetchone()
+            course_id = row["course_id"] if row else None
+
+    if updated and course_id is not None:
+        rebuild_summary(student_id, int(course_id))
+
+    return updated
 
 # â”€â”€ Teacher tools â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -161,32 +222,89 @@ def get_all_students_with_telegram() -> list[dict]:
         rows = conn.execute(
             """SELECT s.*, cs.total_missing
                FROM students s
-               LEFT JOIN course_summaries cs ON cs.student_id = s.id
+               LEFT JOIN enrollments e
+                      ON e.student_id = s.id
+               LEFT JOIN course_summaries cs
+                      ON cs.student_id = s.id
+                     AND cs.course_id  = e.course_id
                WHERE s.telegram_id IS NOT NULL"""
         ).fetchall()
         return [dict(r) for r in rows]
 
-def rebuild_summary(student_id: int, course_id: int = 1):
+def rebuild_summary(student_id: int, course_id: int | None = None) -> bool:
     """Recompute course_summaries for one student"""
     with get_db() as conn:
+        resolved_course_id = course_id
+        if resolved_course_id is None:
+            enrollment = conn.execute(
+                """SELECT course_id
+                   FROM enrollments
+                   WHERE student_id = ?
+                   ORDER BY enrolled_at DESC
+                   LIMIT 1""",
+                (student_id,)
+            ).fetchone()
+            if not enrollment:
+                return False
+            resolved_course_id = enrollment["course_id"]
+
         row = conn.execute(
-            """SELECT
-                 COUNT(*)                                          AS total_assigned,
-                 SUM(status != 'Missing')                         AS total_submitted,
-                 SUM(status  = 'Missing')                         AS total_missing,
-                 SUM(status  = 'Late')                            AS total_late,
-                 SUM(score_pct IS NOT NULL)                       AS total_graded,
-                 ROUND(AVG(CASE WHEN score_pct IS NOT NULL
-                                THEN score_pct END), 2)           AS avg_submitted_pct,
-                 ROUND(
-                   SUM(COALESCE(score_points, 0)) * 100.0 /
-                   NULLIF(SUM(score_max), 0), 2)                  AS avg_all_pct,
-                 SUM(COALESCE(score_points, 0))                   AS points_earned,
-                 SUM(COALESCE(score_max, 0))                      AS points_possible
-               FROM submissions sub
-               JOIN assignments  a ON a.id = sub.assignment_id
-               WHERE sub.student_id = ? AND a.course_id = ?""",
-            (student_id, course_id)
+            """WITH course_assignments AS (
+                   SELECT
+                     a.id AS assignment_id,
+                     COALESCE(
+                       a.max_score,
+                       (
+                         SELECT MAX(s2.score_max)
+                         FROM submissions s2
+                         WHERE s2.assignment_id = a.id
+                           AND s2.score_max IS NOT NULL
+                       ),
+                       0
+                     ) AS possible_points
+                   FROM assignments a
+                   WHERE a.course_id = ?
+                 ),
+                 student_rows AS (
+                   SELECT
+                     ca.assignment_id,
+                     COALESCE(sub.score_points, 0) AS earned_points,
+                     ca.possible_points             AS possible_points,
+                     sub.status                     AS status,
+                     sub.score_pct                  AS score_pct
+                   FROM course_assignments ca
+                   LEFT JOIN submissions sub
+                     ON sub.assignment_id = ca.assignment_id
+                    AND sub.student_id    = ?
+                 )
+                 SELECT
+                   COUNT(*) AS total_assigned,
+                   SUM(
+                     CASE
+                       WHEN status IS NOT NULL AND status != 'Missing' THEN 1
+                       ELSE 0
+                     END
+                   ) AS total_submitted,
+                   SUM(
+                     CASE
+                       WHEN status IS NULL OR status = 'Missing' THEN 1
+                       ELSE 0
+                     END
+                   ) AS total_missing,
+                   SUM(CASE WHEN status = 'Late' THEN 1 ELSE 0 END) AS total_late,
+                   SUM(CASE WHEN score_pct IS NOT NULL THEN 1 ELSE 0 END) AS total_graded,
+                   ROUND(
+                     AVG(CASE WHEN score_pct IS NOT NULL THEN score_pct END),
+                     2
+                   ) AS avg_submitted_pct,
+                   ROUND(
+                     SUM(earned_points) * 100.0 / NULLIF(SUM(possible_points), 0),
+                     2
+                   ) AS avg_all_pct,
+                   SUM(earned_points)   AS points_earned,
+                   SUM(possible_points) AS points_possible
+                 FROM student_rows""",
+            (resolved_course_id, student_id)
         ).fetchone()
 
         conn.execute(
@@ -207,11 +325,12 @@ def rebuild_summary(student_id: int, course_id: int = 1):
                  points_earned     = excluded.points_earned,
                  points_possible   = excluded.points_possible,
                  last_synced       = excluded.last_synced""",
-            (student_id, course_id,
+            (student_id, resolved_course_id,
              row["total_assigned"], row["total_submitted"],
              row["total_missing"],  row["total_late"],
              row["total_graded"],   row["avg_submitted_pct"],
              row["avg_all_pct"],    row["points_earned"],
              row["points_possible"])
         )
+        return True
 

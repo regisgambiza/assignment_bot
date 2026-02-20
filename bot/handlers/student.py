@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardMarkup, Message
 from telegram.ext import ContextTypes
 from database.db import (
     get_student_by_telegram, get_missing_work,
-    get_grades, get_summary, flag_submission
+    get_summary, flag_submission, get_submitted_work
 )
 from bot.keyboards import (
     main_menu_kb, grades_kb, missing_kb,
@@ -85,7 +85,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("No summary data yet.")
             return
 
-        submitted = s["total_assigned"] - s["total_missing"]
+        submitted = s["total_submitted"]
+        if submitted is None:
+            submitted = s["total_assigned"] - s["total_missing"]
+
+        overall_avg = (
+            (float(s["points_earned"] or 0) * 100.0 / float(s["points_possible"]))
+            if s["points_possible"] else 0.0
+        )
+        earned_num = float(s["points_earned"] or 0.0)
+        possible_num = float(s["points_possible"] or 0.0)
+
         pct = round(submitted / s["total_assigned"] * 100) if s["total_assigned"] else 0
         bar = _progress_bar(pct)
 
@@ -94,28 +104,52 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Total assigned: *{s['total_assigned']}*\n"
             f"Submitted: *{submitted}*\n"
             f"Missing: *{s['total_missing']}*\n"
-            f"Avg (submitted): *{s['avg_submitted_pct']}%*\n"
-            f"Avg (overall): *{s['avg_all_pct']}%*\n"
-            f"Points: *{s['points_earned']}/{s['points_possible']}*\n\n"
+            f"Average: *{overall_avg:.2f}%*\n"
+            f"Points: *{earned_num:.2f}/{possible_num:.2f}*\n\n"
             f"Completion: {bar} {pct}%",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(back_kb()),
         )
 
     elif data == "grades":
-        grades = get_grades(student["id"])
-        lines = []
-        for g in grades[:10]:
-            status = "[OK]" if g["status"] == "Submitted" else "[MISSING]"
-            score = g["score_raw"] or "-"
-            title = g["title"][:22] + "..." if len(g["title"]) > 22 else g["title"]
-            lines.append(f"{status} {title} - *{score}*")
+        submitted = get_submitted_work(student["id"])
+        if not submitted:
+            await query.edit_message_text(
+                "Submitted Work\n\nNo submitted assignments yet.",
+                reply_markup=InlineKeyboardMarkup(grades_kb()),
+            )
+            return
+
+        blocks = []
+        for i, g in enumerate(submitted, 1):
+            title = g["title"].strip()
+            status = g["status"] or "Submitted"
+            due = str(g["due_date"])[:10] if g["due_date"] else "-"
+
+            if g["score_raw"]:
+                if g["score_pct"] is not None:
+                    score = f"{g['score_raw']} ({float(g['score_pct']):.1f}%)"
+                else:
+                    score = str(g["score_raw"])
+            else:
+                score = "Pending"
+
+            blocks.append(
+                f"{i}. {title}\n"
+                f"   Status: {status} | Score: {score} | Due: {due}"
+            )
+
+        chunks = _build_chunks(
+            header=f"Submitted Work ({len(submitted)})",
+            blocks=blocks,
+        )
 
         await query.edit_message_text(
-            "*Recent Grades* (last 10)\n\n" + "\n".join(lines),
-            parse_mode="Markdown",
+            chunks[0],
             reply_markup=InlineKeyboardMarkup(grades_kb()),
         )
+        for chunk in chunks[1:]:
+            await query.message.reply_text(chunk)
 
     elif data == "missing":
         missing = get_missing_work(student["id"])
@@ -239,3 +273,27 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _progress_bar(pct: int, length: int = 10) -> str:
     filled = round(pct / 100 * length)
     return "#" * filled + "-" * (length - filled)
+
+
+def _build_chunks(header: str, blocks: list[str], limit: int = 3900) -> list[str]:
+    chunks = []
+    current = header
+
+    for block in blocks:
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+
+        if current != header:
+            chunks.append(current)
+        current = f"{header} (continued)\n\n{block}"
+        if len(current) > limit:
+            # Safety fallback for extremely long titles.
+            current = current[: limit - 3] + "..."
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+

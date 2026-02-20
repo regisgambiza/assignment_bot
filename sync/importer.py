@@ -134,11 +134,16 @@ def import_to_db(students: list[dict], course_id: int = 1,
                 # Upsert assignment
                 conn.execute(
                     """INSERT INTO assignments
-                         (lms_id, course_id, title, created_at)
-                       VALUES (?, ?, ?, ?)
+                         (lms_id, course_id, title, max_score, created_at)
+                       VALUES (?, ?, ?, ?, ?)
                        ON CONFLICT(lms_id) DO UPDATE SET
-                         title = excluded.title""",
-                    (a["lms_id"], course_id, a["title"], a["created_at"])
+                         title = excluded.title,
+                         max_score = CASE
+                           WHEN assignments.max_score IS NULL THEN excluded.max_score
+                           WHEN excluded.max_score IS NULL THEN assignments.max_score
+                           ELSE MAX(assignments.max_score, excluded.max_score)
+                         END""",
+                    (a["lms_id"], course_id, a["title"], a["score_max"], a["created_at"])
                 )
                 assign_row = conn.execute(
                     "SELECT id FROM assignments WHERE lms_id = ?",
