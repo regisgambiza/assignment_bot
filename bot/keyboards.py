@@ -27,12 +27,14 @@ def grades_kb() -> list:
 
 def missing_kb(missing: list[dict]) -> list:
     keyboard = []
-    for item in missing:
+    for idx, item in enumerate(missing, start=1):
         aid = item["assignment_id"]
-        title = item["title"]
-        short = title[:28] + "..." if len(title) > 28 else title
         already_flagged = item.get("flagged_by_student", 0)
-        label = f"Already flagged" if already_flagged else f"Flag: {short}"
+        label = (
+            f"#{idx:02d} Already Reported"
+            if already_flagged
+            else f"Report as Submitted #{idx:02d}"
+        )
         if not already_flagged:
             keyboard.append([
                 InlineKeyboardButton(label, callback_data=f"flag_{aid}")

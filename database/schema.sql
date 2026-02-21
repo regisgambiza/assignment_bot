@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS course_summaries (
     avg_all_pct       REAL,
     points_earned     REAL,
     points_possible   REAL,
+    needs_rebuild     INTEGER DEFAULT 1,
     last_synced       TEXT    DEFAULT (datetime('now')),
     UNIQUE (student_id, course_id)
 );
@@ -97,6 +98,12 @@ CREATE TABLE IF NOT EXISTS sync_log (
     rows_updated INTEGER DEFAULT 0,
     synced_at    TEXT    DEFAULT (datetime('now')),
     notes        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS app_meta (
+    key         TEXT PRIMARY KEY,
+    value       TEXT,
+    updated_at  TEXT DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS campaign_jobs (
@@ -123,6 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_submissions_flagged  ON submissions(flagged_by_st
 CREATE INDEX IF NOT EXISTS idx_assignments_course   ON assignments(course_id);
 CREATE INDEX IF NOT EXISTS idx_students_telegram    ON students(telegram_id);
 CREATE INDEX IF NOT EXISTS idx_campaign_jobs_due    ON campaign_jobs(status, run_at);
+CREATE INDEX IF NOT EXISTS idx_course_summaries_dirty ON course_summaries(needs_rebuild);
 
 -- ── Views ─────────────────────────────────────────────────
 CREATE VIEW IF NOT EXISTS v_missing_work AS
@@ -170,3 +178,68 @@ JOIN   courses     c  ON c.id  = a.course_id
 WHERE  sub.flagged_by_student = 1
 AND    sub.flag_verified      = 0
 ORDER  BY sub.flagged_at ASC;
+
+-- Dirty-mark triggers to keep summary cache fresh
+CREATE TRIGGER IF NOT EXISTS trg_submissions_insert_dirty
+AFTER INSERT ON submissions
+BEGIN
+  UPDATE course_summaries
+  SET needs_rebuild = 1
+  WHERE student_id = NEW.student_id
+    AND course_id = (
+      SELECT course_id FROM assignments WHERE id = NEW.assignment_id
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_submissions_update_dirty
+AFTER UPDATE ON submissions
+BEGIN
+  UPDATE course_summaries
+  SET needs_rebuild = 1
+  WHERE student_id = NEW.student_id
+    AND course_id = (
+      SELECT course_id FROM assignments WHERE id = NEW.assignment_id
+    );
+
+  UPDATE course_summaries
+  SET needs_rebuild = 1
+  WHERE student_id = OLD.student_id
+    AND course_id = (
+      SELECT course_id FROM assignments WHERE id = OLD.assignment_id
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_submissions_delete_dirty
+AFTER DELETE ON submissions
+BEGIN
+  UPDATE course_summaries
+  SET needs_rebuild = 1
+  WHERE student_id = OLD.student_id
+    AND course_id = (
+      SELECT course_id FROM assignments WHERE id = OLD.assignment_id
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_assignments_insert_dirty
+AFTER INSERT ON assignments
+BEGIN
+  UPDATE course_summaries
+  SET needs_rebuild = 1
+  WHERE course_id = NEW.course_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_assignments_update_dirty
+AFTER UPDATE ON assignments
+BEGIN
+  UPDATE course_summaries
+  SET needs_rebuild = 1
+  WHERE course_id = NEW.course_id OR course_id = OLD.course_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_assignments_delete_dirty
+AFTER DELETE ON assignments
+BEGIN
+  UPDATE course_summaries
+  SET needs_rebuild = 1
+  WHERE course_id = OLD.course_id;
+END;

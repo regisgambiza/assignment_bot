@@ -11,16 +11,14 @@ from telegram.ext import ContextTypes
 from database.db import (
     get_student_by_telegram, get_missing_work,
     get_summary, flag_submission, get_submitted_work,
-    add_submission_proof, get_projection_snapshot, get_student_work_filtered
+    add_submission_proof, get_projection_snapshot, get_student_work_filtered,
+    get_student_course_name
 )
 from bot.keyboards import (
     main_menu_kb, grades_kb, missing_kb,
     back_kb, ai_followup_kb, flag_proof_kb
 )
 from services.ai_service import ask_ai, queue_size
-from config import COURSE_NAME
-
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_id = str(update.effective_user.id)
 
@@ -48,11 +46,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_menu(message: Message, student: dict, edit: bool = False):
     summary = get_summary(student["id"])
+    course_name = get_student_course_name(student["id"]) or "Your enrolled class"
     missing_count = summary["total_missing"] if summary else 0
     first = student["full_name"].split()[0]
 
     flag = f"WARNING: {missing_count} missing" if missing_count > 0 else "All caught up"
-    text = f"Hey *{first}*! {flag}\n_{COURSE_NAME}_"
+    text = f"Hey *{first}*! {flag}\n_{course_name}_"
     markup = InlineKeyboardMarkup(main_menu_kb(missing_count))
 
     if edit:
@@ -174,13 +173,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             lines = []
             for i, m in enumerate(missing, 1):
-                flag = " (flagged)" if m["flagged_by_student"] else ""
-                lines.append(f"{i}. {m['title']}{flag}")
+                marker = " (already reported)" if m["flagged_by_student"] else ""
+                lines.append(f"{i}. {m['title']}{marker}")
 
             await query.edit_message_text(
                 f"*Missing Work ({len(missing)} items):*\n\n"
                 + "\n".join(lines)
-                + "\n\nTap a button below to flag any as submitted:",
+                + "\n\nTap a button below to report any as submitted:",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(missing_kb(missing)),
             )
@@ -193,15 +192,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["state"] = "awaiting_flag_proof"
             context.user_data["pending_flag_assignment_id"] = assignment_id
             await query.edit_message_text(
-                "Flag saved.\n\n"
+                "Report saved.\n\n"
                 "Upload a screenshot/photo as proof now,\n"
                 "or tap Skip Proof to continue without evidence.",
                 reply_markup=InlineKeyboardMarkup(flag_proof_kb(assignment_id)),
             )
         else:
             await query.edit_message_text(
-                "Could not flag that assignment.\n"
-                "It may already be flagged or marked as submitted.",
+                "Could not report that assignment.\n"
+                "It may already be reported or marked as submitted.",
                 reply_markup=InlineKeyboardMarkup(back_kb()),
             )
 
@@ -213,10 +212,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from bot.handlers.teacher import notify_teacher_of_flag
         teacher_notified = await notify_teacher_of_flag(query._bot, student, assignment_id)
         text = (
-            "Flag submitted without proof.\n\n"
+            "Report submitted without proof.\n\n"
             "Your teacher has been notified."
             if teacher_notified else
-            "Flag saved, but teacher notification failed right now.\n"
+            "Report saved, but teacher notification failed right now.\n"
             "Teacher can still review this in /pending."
         )
         await query.edit_message_text(
@@ -264,7 +263,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         assignment_id = context.user_data.get("pending_flag_assignment_id")
         if not assignment_id:
             context.user_data.pop("state", None)
-            await update.message.reply_text("No pending flag found. Use /start to continue.")
+            await update.message.reply_text("No pending report found. Use /start to continue.")
             return
 
         file_id = None
@@ -308,7 +307,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                "Could not attach proof to that flag. Please flag again from Missing Work."
+                "Could not attach proof to that report. Please report again from Missing Work."
             )
         return
 

@@ -1,9 +1,10 @@
-﻿import sqlite3
+import asyncio
+import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from config import DB_PATH
 
-# â”€â”€ Connection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Connection ────────────────────────────────────────────
 
 @contextmanager
 def get_db():
@@ -23,8 +24,10 @@ def init_db():
     """Create all tables from schema.sql"""
     schema = Path(__file__).parent / "schema.sql"
     with get_db() as conn:
+        _run_migrations(conn)
         conn.executescript(schema.read_text())
         _run_migrations(conn)
+    _run_one_time_summary_backfill()
     print("Database initialized")
 
 
@@ -33,18 +36,103 @@ def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(row["name"] == column for row in rows)
 
 
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
 def _run_migrations(conn: sqlite3.Connection) -> None:
     # Backfill proof columns for existing databases.
-    if not _column_exists(conn, "submissions", "proof_file_id"):
-        conn.execute("ALTER TABLE submissions ADD COLUMN proof_file_id TEXT")
-    if not _column_exists(conn, "submissions", "proof_file_type"):
-        conn.execute("ALTER TABLE submissions ADD COLUMN proof_file_type TEXT")
-    if not _column_exists(conn, "submissions", "proof_caption"):
-        conn.execute("ALTER TABLE submissions ADD COLUMN proof_caption TEXT")
-    if not _column_exists(conn, "submissions", "proof_uploaded_at"):
-        conn.execute("ALTER TABLE submissions ADD COLUMN proof_uploaded_at TEXT")
+    if _table_exists(conn, "submissions"):
+        if not _column_exists(conn, "submissions", "proof_file_id"):
+            conn.execute("ALTER TABLE submissions ADD COLUMN proof_file_id TEXT")
+        if not _column_exists(conn, "submissions", "proof_file_type"):
+            conn.execute("ALTER TABLE submissions ADD COLUMN proof_file_type TEXT")
+        if not _column_exists(conn, "submissions", "proof_caption"):
+            conn.execute("ALTER TABLE submissions ADD COLUMN proof_caption TEXT")
+        if not _column_exists(conn, "submissions", "proof_uploaded_at"):
+            conn.execute("ALTER TABLE submissions ADD COLUMN proof_uploaded_at TEXT")
 
-# â”€â”€ Students â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if _table_exists(conn, "course_summaries"):
+        if not _column_exists(conn, "course_summaries", "needs_rebuild"):
+            conn.execute(
+                "ALTER TABLE course_summaries ADD COLUMN needs_rebuild INTEGER DEFAULT 1"
+            )
+        conn.execute(
+            "UPDATE course_summaries SET needs_rebuild = 1 WHERE needs_rebuild IS NULL"
+        )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS app_meta (
+               key        TEXT PRIMARY KEY,
+               value      TEXT,
+               updated_at TEXT DEFAULT (datetime('now'))
+           )"""
+    )
+
+
+def _run_one_time_summary_backfill() -> None:
+    marker_key = "summary_backfill_v3_done"
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT value FROM app_meta WHERE key = ?",
+            (marker_key,),
+        ).fetchone()
+    if row:
+        return
+
+    rebuilt = rebuild_all_summaries()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO app_meta (key, value, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET
+                 value = excluded.value,
+                 updated_at = excluded.updated_at""",
+            (marker_key, str(rebuilt)),
+        )
+    print(f"Summary backfill completed: {rebuilt} student-course rows rebuilt.")
+
+
+def _summary_needs_refresh(
+    conn: sqlite3.Connection,
+    student_id: int,
+    course_id: int,
+    summary_row: sqlite3.Row | None,
+) -> bool:
+    if not summary_row:
+        return True
+    if int(summary_row["needs_rebuild"] or 0) == 1:
+        return True
+
+    last_synced = summary_row["last_synced"] or "1970-01-01 00:00:00"
+
+    max_submission = conn.execute(
+        """SELECT MAX(sub.updated_at) AS max_updated
+           FROM submissions sub
+           JOIN assignments a ON a.id = sub.assignment_id
+           WHERE sub.student_id = ? AND a.course_id = ?""",
+        (student_id, course_id),
+    ).fetchone()
+    if max_submission and max_submission["max_updated"]:
+        if str(max_submission["max_updated"]) > str(last_synced):
+            return True
+
+    max_assignment = conn.execute(
+        """SELECT MAX(created_at) AS max_created
+           FROM assignments
+           WHERE course_id = ?""",
+        (course_id,),
+    ).fetchone()
+    if max_assignment and max_assignment["max_created"]:
+        if str(max_assignment["max_created"]) > str(last_synced):
+            return True
+
+    return False
+
+# ── Students ──────────────────────────────────────────────
 
 def get_student_by_telegram(telegram_id: str) -> dict | None:
     with get_db() as conn:
@@ -92,7 +180,7 @@ def link_student(lms_id: str, telegram_id: str,
         )
         return result.rowcount > 0
 
-# â”€â”€ Submissions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Submissions ───────────────────────────────────────────
 
 def get_missing_work(student_id: int, limit: int | None = None) -> list[dict]:
     with get_db() as conn:
@@ -100,7 +188,15 @@ def get_missing_work(student_id: int, limit: int | None = None) -> list[dict]:
                         sub.flagged_by_student
                  FROM   submissions sub
                  JOIN   assignments a ON a.id = sub.assignment_id
-                 WHERE  sub.student_id = ? AND sub.status = 'Missing'
+                 WHERE  sub.student_id = ?
+                   AND  (
+                          sub.status = 'Missing'
+                          OR sub.score_points = 0
+                          OR (
+                               sub.status IN ('Submitted', 'Late', 'Graded')
+                               AND sub.score_points IS NULL
+                             )
+                        )
                  ORDER  BY a.created_at ASC"""
         params: tuple = (student_id,)
         if limit is not None:
@@ -138,6 +234,8 @@ def get_submitted_work(student_id: int) -> list[dict]:
                JOIN   assignments a ON a.id = sub.assignment_id
                WHERE  sub.student_id = ?
                  AND  sub.status IN ('Submitted', 'Late', 'Graded')
+                 AND  sub.score_points IS NOT NULL
+                 AND  sub.score_points != 0
                ORDER  BY COALESCE(a.due_date, a.created_at) DESC, a.created_at DESC""",
             (student_id,)
         ).fetchall()
@@ -157,7 +255,12 @@ def get_student_work_filtered(
                 a.id AS assignment_id,
                 a.title,
                 a.due_date,
-                COALESCE(sub.status, 'Missing') AS status,
+                CASE
+                    WHEN sub.score_points = 0 THEN 'Missing'
+                    WHEN sub.status IN ('Submitted', 'Late', 'Graded')
+                      AND sub.score_points IS NULL THEN 'Missing'
+                    ELSE COALESCE(sub.status, 'Missing')
+                END AS status,
                 sub.score_raw,
                 sub.score_pct
             FROM assignments a
@@ -233,7 +336,12 @@ def get_projection_snapshot(
                      ca.assignment_id,
                      ca.possible_points,
                      COALESCE(sub.score_points, 0) AS earned_points,
-                     COALESCE(sub.status, 'Missing') AS status
+                     CASE
+                       WHEN sub.score_points = 0 THEN 'Missing'
+                       WHEN sub.status IN ('Submitted', 'Late', 'Graded')
+                         AND sub.score_points IS NULL THEN 'Missing'
+                       ELSE COALESCE(sub.status, 'Missing')
+                     END AS status
                    FROM course_assignments ca
                    LEFT JOIN submissions sub
                      ON sub.assignment_id = ca.assignment_id
@@ -278,9 +386,23 @@ def get_student_course_id(student_id: int) -> int | None:
         return int(row["course_id"]) if row else None
 
 
-def get_summary(student_id: int, course_id: int | None = None) -> dict | None:
+def get_student_course_name(student_id: int) -> str | None:
     with get_db() as conn:
-        resolved_course_id = course_id
+        row = conn.execute(
+            """SELECT c.name AS course_name
+               FROM enrollments e
+               JOIN courses c ON c.id = e.course_id
+               WHERE e.student_id = ?
+               ORDER BY e.enrolled_at DESC
+               LIMIT 1""",
+            (student_id,),
+        ).fetchone()
+        return str(row["course_name"]) if row and row["course_name"] else None
+
+
+def get_summary(student_id: int, course_id: int | None = None) -> dict | None:
+    resolved_course_id = course_id
+    with get_db() as conn:
         if resolved_course_id is None:
             enrollment = conn.execute(
                 """SELECT course_id
@@ -288,7 +410,7 @@ def get_summary(student_id: int, course_id: int | None = None) -> dict | None:
                    WHERE student_id = ?
                    ORDER BY enrolled_at DESC
                    LIMIT 1""",
-                (student_id,)
+                (student_id,),
             ).fetchone()
             if not enrollment:
                 return None
@@ -297,12 +419,27 @@ def get_summary(student_id: int, course_id: int | None = None) -> dict | None:
         row = conn.execute(
             """SELECT * FROM course_summaries
                WHERE student_id = ? AND course_id = ?""",
-            (student_id, resolved_course_id)
+            (student_id, resolved_course_id),
         ).fetchone()
-        return dict(row) if row else None
+        needs_refresh = _summary_needs_refresh(
+            conn, student_id, int(resolved_course_id), row
+        )
+
+    if needs_refresh:
+        rebuilt = rebuild_summary(student_id, int(resolved_course_id))
+        if not rebuilt:
+            return None
+        with get_db() as conn:
+            row = conn.execute(
+                """SELECT * FROM course_summaries
+                   WHERE student_id = ? AND course_id = ?""",
+                (student_id, resolved_course_id),
+            ).fetchone()
+
+    return dict(row) if row else None
 
 
-# â”€â”€ Flagging â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Flagging ──────────────────────────────────────────────
 
 def flag_submission(student_id: int, assignment_id: int) -> bool:
     with get_db() as conn:
@@ -316,7 +453,14 @@ def flag_submission(student_id: int, assignment_id: int) -> bool:
                    proof_uploaded_at  = NULL
                WHERE student_id   = ?
                AND   assignment_id = ?
-               AND   status       = 'Missing'""",
+               AND   (
+                       status = 'Missing'
+                       OR score_points = 0
+                       OR (
+                            status IN ('Submitted', 'Late', 'Graded')
+                            AND score_points IS NULL
+                          )
+                     )""",
             (student_id, assignment_id)
         )
         return result.rowcount > 0
@@ -388,7 +532,7 @@ def verify_flag(student_id: int, assignment_id: int,
 
     return updated
 
-# â”€â”€ Teacher tools â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Teacher tools ─────────────────────────────────────────
 
 def get_at_risk_students() -> list[dict]:
     with get_db() as conn:
@@ -422,7 +566,7 @@ def get_pending_flags() -> list[dict]:
         return [dict(r) for r in rows]
 
 def get_all_students_with_telegram() -> list[dict]:
-    """All registered students â€” for broadcast"""
+    """All registered students — for broadcast"""
     with get_db() as conn:
         rows = conn.execute(
             """SELECT s.*, cs.total_missing
@@ -519,6 +663,74 @@ def list_campaign_jobs(limit: int = 20) -> list[dict]:
         ).fetchall()
         return [dict(r) for r in rows]
 
+
+def rebuild_all_summaries() -> int:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT student_id, course_id
+               FROM enrollments
+               UNION
+               SELECT DISTINCT sub.student_id, a.course_id
+               FROM submissions sub
+               JOIN assignments a ON a.id = sub.assignment_id
+               ORDER BY student_id, course_id"""
+        ).fetchall()
+
+    rebuilt = 0
+    for row in rows:
+        if rebuild_summary(int(row["student_id"]), int(row["course_id"])):
+            rebuilt += 1
+    return rebuilt
+
+
+def rebuild_dirty_summaries(limit: int = 200) -> int:
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT student_id, course_id
+               FROM (
+                 SELECT e.student_id, e.course_id
+                 FROM enrollments e
+                 LEFT JOIN course_summaries cs
+                   ON cs.student_id = e.student_id
+                  AND cs.course_id  = e.course_id
+                 WHERE cs.id IS NULL OR cs.needs_rebuild = 1
+
+                 UNION
+
+                 SELECT sub.student_id, a.course_id
+                 FROM submissions sub
+                 JOIN assignments a ON a.id = sub.assignment_id
+                 LEFT JOIN course_summaries cs
+                   ON cs.student_id = sub.student_id
+                  AND cs.course_id  = a.course_id
+                 WHERE cs.id IS NULL OR cs.needs_rebuild = 1
+               )
+               ORDER BY student_id, course_id
+               LIMIT ?""",
+            (int(limit),),
+        ).fetchall()
+
+    rebuilt = 0
+    for row in rows:
+        if rebuild_summary(int(row["student_id"]), int(row["course_id"])):
+            rebuilt += 1
+    return rebuilt
+
+
+async def summary_repair_worker(interval_sec: int = 300, batch_size: int = 200):
+    print(
+        "Summary repair worker started - interval:",
+        f"{interval_sec}s, batch_size={batch_size}",
+    )
+    while True:
+        try:
+            rebuilt = rebuild_dirty_summaries(batch_size)
+            if rebuilt:
+                print(f"Summary repair worker rebuilt {rebuilt} row(s).")
+        except Exception as exc:
+            print(f"Summary repair worker error: {exc}")
+        await asyncio.sleep(interval_sec)
+
 def rebuild_summary(student_id: int, course_id: int | None = None) -> bool:
     """Recompute course_summaries for one student"""
     with get_db() as conn:
@@ -559,6 +771,7 @@ def rebuild_summary(student_id: int, course_id: int | None = None) -> bool:
                      COALESCE(sub.score_points, 0) AS earned_points,
                      ca.possible_points             AS possible_points,
                      sub.status                     AS status,
+                     sub.score_points               AS score_points,
                      sub.score_pct                  AS score_pct
                    FROM course_assignments ca
                    LEFT JOIN submissions sub
@@ -569,20 +782,54 @@ def rebuild_summary(student_id: int, course_id: int | None = None) -> bool:
                    COUNT(*) AS total_assigned,
                    SUM(
                      CASE
-                       WHEN status IS NOT NULL AND status != 'Missing' THEN 1
+                       WHEN status IS NOT NULL
+                        AND status != 'Missing'
+                        AND score_points IS NOT NULL
+                        AND score_points != 0
+                       THEN 1
                        ELSE 0
                      END
                    ) AS total_submitted,
                    SUM(
                      CASE
-                       WHEN status IS NULL OR status = 'Missing' THEN 1
+                       WHEN status IS NULL
+                         OR status = 'Missing'
+                         OR score_points = 0
+                         OR (
+                              status IN ('Submitted', 'Late', 'Graded')
+                              AND score_points IS NULL
+                            )
+                       THEN 1
                        ELSE 0
                      END
                    ) AS total_missing,
-                   SUM(CASE WHEN status = 'Late' THEN 1 ELSE 0 END) AS total_late,
-                   SUM(CASE WHEN score_pct IS NOT NULL THEN 1 ELSE 0 END) AS total_graded,
+                   SUM(
+                     CASE
+                       WHEN status = 'Late'
+                        AND score_points IS NOT NULL
+                        AND score_points != 0
+                       THEN 1
+                       ELSE 0
+                     END
+                   ) AS total_late,
+                   SUM(
+                     CASE
+                       WHEN score_pct IS NOT NULL
+                        AND score_points IS NOT NULL
+                        AND score_points != 0
+                       THEN 1
+                       ELSE 0
+                     END
+                   ) AS total_graded,
                    ROUND(
-                     AVG(CASE WHEN score_pct IS NOT NULL THEN score_pct END),
+                     AVG(
+                       CASE
+                         WHEN score_pct IS NOT NULL
+                          AND score_points IS NOT NULL
+                          AND score_points != 0
+                         THEN score_pct
+                       END
+                     ),
                      2
                    ) AS avg_submitted_pct,
                    ROUND(
@@ -600,8 +847,8 @@ def rebuild_summary(student_id: int, course_id: int | None = None) -> bool:
                  (student_id, course_id, total_assigned, total_submitted,
                   total_missing, total_late, total_graded,
                   avg_submitted_pct, avg_all_pct,
-                  points_earned, points_possible, last_synced)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,datetime('now'))
+                  points_earned, points_possible, needs_rebuild, last_synced)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,0,datetime('now'))
                ON CONFLICT(student_id, course_id) DO UPDATE SET
                  total_assigned    = excluded.total_assigned,
                  total_submitted   = excluded.total_submitted,
@@ -612,6 +859,7 @@ def rebuild_summary(student_id: int, course_id: int | None = None) -> bool:
                  avg_all_pct       = excluded.avg_all_pct,
                  points_earned     = excluded.points_earned,
                  points_possible   = excluded.points_possible,
+                 needs_rebuild     = 0,
                  last_synced       = excluded.last_synced""",
             (student_id, resolved_course_id,
              row["total_assigned"], row["total_submitted"],
@@ -621,4 +869,5 @@ def rebuild_summary(student_id: int, course_id: int | None = None) -> bool:
              row["points_possible"])
         )
         return True
+
 

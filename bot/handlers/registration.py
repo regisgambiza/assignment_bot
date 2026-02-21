@@ -17,7 +17,7 @@ from bot.keyboards import confirm_kb, selection_kb
 async def ask_for_identity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["state"] = "awaiting_search"
     await update.message.reply_text(
-        "👋 Welcome to *8/1 Mathematics Bot!*\n\n"
+        "👋 Welcome to *Assignment Bot!*\n\n"
         "To get started, please send me:\n"
         "• Your *Student ID number*, or\n"
         "• Your *Full Name*\n\n"
@@ -76,7 +76,7 @@ async def _show_confirm(target, context: ContextTypes.DEFAULT_TYPE,
         "🎓 *Is this you?*\n\n"
         f"👤 Name:    *{student['full_name']}*\n"
         f"🆔 ID:       `{masked_id}`\n"
-        f"📚 Course:  8/1 Mathematics"
+        f"📚 Class: your enrolled class"
     )
 
     # target can be a Message or a CallbackQuery
@@ -158,3 +158,4 @@ async def handle_reg_buttons(update: Update,
         return True
 
     return False   # not a registration button
+

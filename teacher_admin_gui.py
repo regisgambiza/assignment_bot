@@ -341,7 +341,17 @@ class TeacherAdminDashboard(tk.Tk):
                 SELECT
                     sub.student_id,
                     a.course_id,
-                    SUM(sub.status = 'Missing') AS total_missing,
+                    SUM(
+                        CASE
+                            WHEN sub.status = 'Missing'
+                              OR sub.score_points = 0
+                              OR (
+                                   sub.status IN ('Submitted', 'Late', 'Graded')
+                                   AND sub.score_points IS NULL
+                                 )
+                            THEN 1 ELSE 0
+                        END
+                    ) AS total_missing,
                     ROUND(
                         SUM(COALESCE(sub.score_points, 0)) * 100.0 /
                         NULLIF(SUM(COALESCE(sub.score_max, 0)), 0), 2
@@ -567,7 +577,17 @@ class TeacherAdminDashboard(tk.Tk):
                 SELECT
                     sub.student_id,
                     a.course_id,
-                    SUM(sub.status = 'Missing') AS total_missing,
+                    SUM(
+                        CASE
+                            WHEN sub.status = 'Missing'
+                              OR sub.score_points = 0
+                              OR (
+                                   sub.status IN ('Submitted', 'Late', 'Graded')
+                                   AND sub.score_points IS NULL
+                                 )
+                            THEN 1 ELSE 0
+                        END
+                    ) AS total_missing,
                     ROUND(
                         SUM(COALESCE(sub.score_points, 0)) * 100.0 /
                         NULLIF(SUM(COALESCE(sub.score_max, 0)), 0), 2
@@ -818,6 +838,7 @@ class TeacherAdminDashboard(tk.Tk):
                 COALESCE(sub.score_points, 0) AS earned_points,
                 ca.possible_points             AS possible_points,
                 sub.status                     AS status,
+                sub.score_points               AS score_points,
                 sub.score_pct                  AS score_pct
               FROM course_assignments ca
               LEFT JOIN submissions sub
@@ -828,19 +849,56 @@ class TeacherAdminDashboard(tk.Tk):
               COUNT(*) AS total_assigned,
               SUM(
                 CASE
-                  WHEN status IS NOT NULL AND status != 'Missing' THEN 1
+                  WHEN status IS NOT NULL
+                   AND status != 'Missing'
+                   AND score_points IS NOT NULL
+                   AND score_points != 0
+                  THEN 1
                   ELSE 0
                 END
               ) AS total_submitted,
               SUM(
                 CASE
-                  WHEN status IS NULL OR status = 'Missing' THEN 1
+                  WHEN status IS NULL
+                    OR status = 'Missing'
+                    OR score_points = 0
+                    OR (
+                         status IN ('Submitted', 'Late', 'Graded')
+                         AND score_points IS NULL
+                       )
+                  THEN 1
                   ELSE 0
                 END
               ) AS total_missing,
-              SUM(CASE WHEN status = 'Late' THEN 1 ELSE 0 END) AS total_late,
-              SUM(CASE WHEN score_pct IS NOT NULL THEN 1 ELSE 0 END) AS total_graded,
-              ROUND(AVG(CASE WHEN score_pct IS NOT NULL THEN score_pct END), 2) AS avg_submitted_pct,
+              SUM(
+                CASE
+                  WHEN status = 'Late'
+                   AND score_points IS NOT NULL
+                   AND score_points != 0
+                  THEN 1
+                  ELSE 0
+                END
+              ) AS total_late,
+              SUM(
+                CASE
+                  WHEN score_pct IS NOT NULL
+                   AND score_points IS NOT NULL
+                   AND score_points != 0
+                  THEN 1
+                  ELSE 0
+                END
+              ) AS total_graded,
+              ROUND(
+                AVG(
+                  CASE
+                    WHEN score_pct IS NOT NULL
+                     AND score_points IS NOT NULL
+                     AND score_points != 0
+                    THEN score_pct
+                  END
+                ),
+                2
+              ) AS avg_submitted_pct,
               ROUND(
                 SUM(earned_points) * 100.0 /
                 NULLIF(SUM(possible_points), 0), 2

@@ -1,0 +1,325 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Teacher Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css') }}">
+</head>
+<body>
+  <div class="orb orb-a"></div>
+  <div class="orb orb-b"></div>
+  <div class="orb orb-c"></div>
+
+  <header class="hero shell">
+    <div>
+      <p class="eyebrow">Assignment Intelligence</p>
+      <h1>Teacher Control Center</h1>
+      <p class="subtitle">Modern command dashboard for learner health, missing-work verification, and campaign operations.</p>
+      <div class="hero-meta">
+        <span id="meta-db">DB: {{ db_path }}</span>
+        <span id="meta-now">Loaded: {{ now }}</span>
+      </div>
+    </div>
+
+    <div class="hero-controls card">
+      <label>
+        Active Course
+        <select id="global-course"></select>
+      </label>
+      <label>
+        At-Risk Threshold
+        <input id="global-threshold" type="number" min="1" max="50" value="3">
+      </label>
+      <label>
+        Learner Search
+        <input id="global-search" type="text" placeholder="name, LMS ID, telegram...">
+      </label>
+      <div class="hero-actions">
+        <button id="btn-refresh-all" class="btn btn-primary">Refresh Dashboard</button>
+        <button id="btn-export-learners" class="btn btn-ghost">Export Learners CSV</button>
+      </div>
+    </div>
+  </header>
+
+  <nav class="tabs shell" aria-label="Dashboard sections">
+    <button class="tab-btn active" data-tab="overview">Overview</button>
+    <button class="tab-btn" data-tab="learners">Learners</button>
+    <button class="tab-btn" data-tab="reports">Reports Queue</button>
+    <button class="tab-btn" data-tab="atrisk">At-Risk</button>
+    <button class="tab-btn" data-tab="campaigns">Campaigns</button>
+    <button class="tab-btn" data-tab="maintenance">Maintenance</button>
+  </nav>
+
+  <main class="shell">
+    <section id="tab-overview" class="tab-panel active">
+      <div class="kpi-grid">
+        <article class="kpi card">
+          <h3>Learners</h3>
+          <p id="kpi-students" class="kpi-value">-</p>
+          <small id="kpi-registered">Registered: -</small>
+        </article>
+        <article class="kpi card">
+          <h3>Assignments</h3>
+          <p id="kpi-assignments" class="kpi-value">-</p>
+          <small id="kpi-submissions">Submissions: -</small>
+        </article>
+        <article class="kpi card warning">
+          <h3>Missing Work</h3>
+          <p id="kpi-missing" class="kpi-value">-</p>
+          <small id="kpi-pending">Pending reports: -</small>
+        </article>
+        <article class="kpi card accent">
+          <h3>Course Average</h3>
+          <p id="kpi-avg" class="kpi-value">-</p>
+          <small id="kpi-atrisk">At-risk learners: -</small>
+        </article>
+      </div>
+
+      <div class="overview-grid">
+        <article class="card">
+          <div class="panel-head">
+            <h2>Status Distribution</h2>
+            <button class="btn btn-mini" data-action="refresh-overview">Refresh</button>
+          </div>
+          <div id="status-breakdown" class="stack-list"></div>
+        </article>
+
+        <article class="card">
+          <div class="panel-head">
+            <h2>Top Missing Assignments</h2>
+          </div>
+          <div id="top-missing" class="stack-list"></div>
+        </article>
+
+        <article class="card">
+          <div class="panel-head">
+            <h2>Completion Pulse</h2>
+          </div>
+          <div class="completion-wrap">
+            <div class="completion-ring" id="completion-ring">
+              <span id="completion-text">0%</span>
+            </div>
+            <div class="latest-sync" id="latest-sync">No sync info yet.</div>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="tab-learners" class="tab-panel">
+      <div class="card">
+        <div class="panel-head split">
+          <h2>Learner Directory</h2>
+          <div class="row-actions">
+            <button id="btn-learners-refresh" class="btn btn-mini">Refresh</button>
+            <button id="btn-learners-export" class="btn btn-mini">Export CSV</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead id="learners-head">
+              <tr>
+                <th class="sortable" data-sort-key="id">ID</th>
+                <th class="sortable" data-sort-key="full_name">Name</th>
+                <th class="sortable" data-sort-key="course_name">Class</th>
+                <th class="sortable" data-sort-key="lms_id">LMS ID</th>
+                <th class="sortable" data-sort-key="telegram_id">Telegram</th>
+                <th class="sortable" data-sort-key="total_missing">Missing</th>
+                <th class="sortable" data-sort-key="avg_all_pct">Avg %</th>
+                <th class="sortable" data-sort-key="completion_pct">Completion</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="learners-table"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <aside id="learner-detail" class="card detail-panel hidden">
+        <div class="panel-head split">
+          <h3 id="detail-title">Learner Detail</h3>
+          <button id="detail-close" class="btn btn-mini">Close</button>
+        </div>
+        <div id="detail-summary" class="detail-summary"></div>
+        <div class="table-wrap tight">
+          <table>
+            <thead id="detail-work-head">
+              <tr>
+                <th class="sortable" data-sort-key="title">Assignment</th>
+                <th class="sortable" data-sort-key="status">Status</th>
+                <th class="sortable" data-sort-key="score_points">Score</th>
+                <th class="sortable" data-sort-key="due_date">Due</th>
+                <th class="sortable" data-sort-key="proof_uploaded_at">Proof</th>
+              </tr>
+            </thead>
+            <tbody id="detail-work"></tbody>
+          </table>
+        </div>
+      </aside>
+    </section>
+
+    <section id="tab-reports" class="tab-panel">
+      <div class="card">
+        <div class="panel-head split">
+          <h2>Report Verification Queue</h2>
+          <div class="row-actions">
+            <label class="inline-field">Reviewer <input id="report-reviewer" type="text" value="Web Dashboard"></label>
+            <button id="btn-reports-refresh" class="btn btn-mini">Refresh</button>
+            <button id="btn-reports-export" class="btn btn-mini">Export CSV</button>
+          </div>
+        </div>
+        <div id="reports-list" class="report-grid"></div>
+      </div>
+    </section>
+
+    <section id="tab-atrisk" class="tab-panel">
+      <div class="card">
+        <div class="panel-head split">
+          <h2>At-Risk Learners</h2>
+          <button id="btn-atrisk-refresh" class="btn btn-mini">Refresh</button>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead id="atrisk-head">
+              <tr>
+                <th class="sortable" data-sort-key="full_name">Learner</th>
+                <th class="sortable" data-sort-key="telegram_id">Telegram</th>
+                <th class="sortable" data-sort-key="course_name">Course</th>
+                <th class="sortable" data-sort-key="total_missing">Missing</th>
+                <th class="sortable" data-sort-key="total_assigned">Assigned</th>
+                <th class="sortable" data-sort-key="total_submitted">Submitted</th>
+                <th class="sortable" data-sort-key="avg_all_pct">Avg %</th>
+                <th class="sortable" data-sort-key="points_earned">Points</th>
+                <th class="sortable" data-sort-key="last_synced">Last Synced</th>
+              </tr>
+            </thead>
+            <tbody id="atrisk-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-campaigns" class="tab-panel">
+      <div class="campaign-layout">
+        <article class="card">
+          <div class="panel-head">
+            <h2>Create Campaign</h2>
+          </div>
+
+          <div class="form-grid">
+            <label>
+              Template
+              <select id="campaign-template"></select>
+            </label>
+            <label>
+              Schedule
+              <select id="campaign-schedule"></select>
+            </label>
+            <label id="campaign-runat-wrap" class="hidden">
+              Run At
+              <input id="campaign-run-at" type="datetime-local">
+            </label>
+            <label>
+              Created By
+              <input id="campaign-created-by" type="text" value="web_dashboard">
+            </label>
+            <label id="campaign-text-wrap" class="full-row hidden">
+              Custom Template Text
+              <textarea id="campaign-text" rows="6" placeholder="Hi {first_name}, you have {missing_count} missing...\n\n{missing_list}"></textarea>
+            </label>
+            <div class="full-row row-actions">
+              <button id="btn-campaign-create" class="btn btn-primary">Schedule Campaign</button>
+            </div>
+          </div>
+
+          <div class="preview-block">
+            <h3>Template Preview</h3>
+            <pre id="campaign-preview"></pre>
+          </div>
+        </article>
+
+        <article class="card">
+          <div class="panel-head split">
+            <h2>Recent Jobs</h2>
+            <div class="row-actions">
+              <button id="btn-campaign-run-due" class="btn btn-mini">Run Due Now</button>
+              <button id="btn-campaign-refresh" class="btn btn-mini">Refresh</button>
+            </div>
+          </div>
+          <p class="hint" id="campaign-worker-status">
+            Background sender checks due jobs automatically.
+          </p>
+
+          <div class="table-wrap">
+            <table>
+              <thead id="campaign-jobs-head">
+                <tr>
+                  <th class="sortable" data-sort-key="id">ID</th>
+                  <th class="sortable" data-sort-key="template_key">Template</th>
+                  <th class="sortable" data-sort-key="run_at">Run At</th>
+                  <th class="sortable" data-sort-key="status">Status</th>
+                  <th class="sortable" data-sort-key="target_count">Targets</th>
+                  <th class="sortable" data-sort-key="sent_count">Sent</th>
+                  <th class="sortable" data-sort-key="created_by">Created By</th>
+                  <th class="sortable" data-sort-key="error">Error</th>
+                </tr>
+              </thead>
+              <tbody id="campaign-jobs-table"></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section id="tab-maintenance" class="tab-panel">
+      <div class="maintenance-grid">
+        <article class="card">
+          <div class="panel-head">
+            <h2>Operations</h2>
+          </div>
+          <div class="action-grid">
+            <button id="btn-maint-backup" class="btn btn-ghost">Create Backup</button>
+            <button id="btn-maint-rebuild" class="btn btn-ghost">Rebuild Summaries</button>
+            <button id="btn-maint-schema" class="btn btn-ghost danger">Initialize Schema</button>
+          </div>
+          <p class="hint">Schema init re-runs `database/schema.sql` and should be used with care.</p>
+        </article>
+
+        <article class="card">
+          <div class="panel-head split">
+            <h2>Sync Log</h2>
+            <button id="btn-sync-refresh" class="btn btn-mini">Refresh</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead id="sync-log-head">
+                <tr>
+                  <th class="sortable" data-sort-key="synced_at">Synced At</th>
+                  <th class="sortable" data-sort-key="source">Source</th>
+                  <th class="sortable" data-sort-key="rows_added">Rows Added</th>
+                  <th class="sortable" data-sort-key="rows_updated">Rows Updated</th>
+                  <th class="sortable" data-sort-key="course_id">Course</th>
+                  <th class="sortable" data-sort-key="notes">Notes</th>
+                </tr>
+              </thead>
+              <tbody id="sync-log-table"></tbody>
+            </table>
+          </div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+
+  <script>
+    window.DASHBOARD_BOOTSTRAP = {
+      dbPath: "{{ db_path }}",
+      loadedAt: "{{ now }}"
+    };
+  </script>
+  <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

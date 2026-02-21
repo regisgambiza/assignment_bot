@@ -24,7 +24,7 @@ from bot.handlers.teacher import (
     campaign_worker,
 )
 from services.ai_service import ai_worker
-from database.db import init_db
+from database.db import init_db, summary_repair_worker
 from config import BOT_TOKEN
 
 # â”€â”€ Start up â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -44,6 +44,7 @@ async def post_init(app):
     """Runs once when bot starts"""
     init_db()
     asyncio.create_task(ai_worker())
+    asyncio.create_task(summary_repair_worker())
     asyncio.create_task(campaign_worker(app.bot))
     me = await app.bot.get_me()
     print(f"Bot running: @{me.username}")

@@ -132,3 +132,31 @@ railway up
 ```
 
 Set your .env variables in Railway dashboard under Variables.
+
+---
+
+## Teacher Web Dashboard
+
+Run the new browser dashboard:
+
+```bash
+pip install -r requirements.txt
+python -m teacher_dashboard
+```
+
+Open:
+
+```
+http://127.0.0.1:8787
+```
+
+Main features:
+- Live overview analytics
+- Learner search, detail view, unlink, summary rebuild
+- Pending report verification with evidence preview/download
+- At-risk learner tracking
+- Campaign scheduling and job history
+  - Scheduled jobs are auto-processed by the dashboard worker
+  - `Run Due Now` button can trigger immediate sending
+- Maintenance actions (backup, schema init, summary rebuild)
+- CSV export for learners and pending reports
