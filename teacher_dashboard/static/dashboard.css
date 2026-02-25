@@ -601,6 +601,58 @@ tbody tr:hover {
   gap: 10px;
 }
 
+.maintenance-subhead {
+  margin-top: 1.5rem;
+}
+
+.sync-controls {
+  align-items: end;
+  grid-template-columns: minmax(150px, 220px) minmax(300px, 1fr) minmax(170px, max-content) minmax(0, 1fr);
+}
+
+.sync-period-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.sync-period-select {
+  cursor: pointer;
+}
+
+.sync-status {
+  min-height: 1.1rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  align-self: center;
+}
+
+.sync-custom-range {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(140px, 1fr));
+}
+
+.sync-date-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.sync-date-input {
+  font: inherit;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  width: 100%;
+}
+
 .hint {
   margin-top: 10px;
   color: var(--muted);
@@ -664,6 +716,18 @@ tbody tr:hover {
 
   .action-grid {
     grid-template-columns: 1fr;
+  }
+
+  .sync-controls {
+    align-items: stretch;
+  }
+
+  .sync-custom-range {
+    grid-template-columns: 1fr;
+  }
+
+  .sync-status {
+    align-self: start;
   }
 }
 

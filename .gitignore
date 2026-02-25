@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+database/backups/
+
+learner_data_writer/venv/
+learner_data_writer/token.json
+learner_data_writer/.webui_secret_key
+learner_data_writer/client_secrets.json
+learner_data_writer/client_secret_*.json
+learner_data_writer/reports/
+learner_data_writer/student_reports.txt

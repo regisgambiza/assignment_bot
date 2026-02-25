@@ -189,6 +189,9 @@ function setupSectionActions() {
   el("btn-maint-rebuild").addEventListener("click", rebuildSummaries);
   el("btn-maint-schema").addEventListener("click", initSchema);
   el("btn-sync-refresh").addEventListener("click", refreshSyncLog);
+  el("btn-sync-classroom")?.addEventListener("click", startClassroomSync);
+  el("sync-period")?.addEventListener("change", toggleSyncCustomRange);
+  toggleSyncCustomRange();
 
   document.querySelector('[data-action="refresh-overview"]').addEventListener("click", refreshOverview);
 
@@ -662,6 +665,28 @@ async function openLearnerDetail(studentId) {
   state.detailWorkRows = work;
   renderDetailWorkTable();
 
+  // Keep learners table in sync with rebuilt summary values shown in detail view.
+  const learnerIdx = state.learners.findIndex((row) => Number(row.id) === Number(studentId));
+  if (learnerIdx >= 0) {
+    const current = state.learners[learnerIdx];
+    const totalAssigned = Number(summary.total_assigned ?? current.total_assigned ?? 0);
+    const totalSubmitted = Number(summary.total_submitted ?? current.total_submitted ?? 0);
+    const totalMissing = Number(summary.total_missing ?? current.total_missing ?? 0);
+    const avgAllPct = Number(summary.avg_all_pct ?? current.avg_all_pct ?? 0);
+    const completionPct = totalAssigned > 0 ? (totalSubmitted * 100.0) / totalAssigned : 0;
+
+    state.learners[learnerIdx] = {
+      ...current,
+      total_assigned: totalAssigned,
+      total_submitted: totalSubmitted,
+      total_missing: totalMissing,
+      avg_all_pct: avgAllPct,
+      completion_pct: completionPct,
+      last_synced: summary.last_synced || current.last_synced || "",
+    };
+    renderLearnersTable();
+  }
+
   el("learner-detail").classList.remove("hidden");
 }
 
@@ -931,6 +956,122 @@ async function boot() {
     await refreshAll();
   } catch (error) {
     showToast(error.message, "error");
+  }
+}
+
+// ── Google Classroom Sync ────────────────────────────────────────────────────
+
+let _syncPollTimer = null;
+
+function toggleSyncCustomRange() {
+  const period = el("sync-period")?.value || "30";
+  const customWrap = el("sync-custom-range");
+  if (!customWrap) return;
+
+  const isCustom = period === "custom";
+  customWrap.classList.toggle("hidden", !isCustom);
+
+  if (!isCustom) return;
+
+  const startInput = el("sync-start-date");
+  const endInput = el("sync-end-date");
+  if (!startInput || !endInput) return;
+
+  if (!endInput.value) {
+    const today = new Date();
+    endInput.value = today.toISOString().slice(0, 10);
+  }
+  if (!startInput.value) {
+    const start = new Date();
+    start.setDate(start.getDate() - 30);
+    startInput.value = start.toISOString().slice(0, 10);
+  }
+}
+
+async function startClassroomSync() {
+  const btn = el("btn-sync-classroom");
+  const statusEl = el("sync-classroom-status");
+  const days = el("sync-period")?.value || "30";
+  const payload = { days };
+  let rangeLabel = `window=${days}`;
+
+  if (!btn || !statusEl) return;
+  if (_syncPollTimer) return;
+
+  if (days === "custom") {
+    const startDate = String(el("sync-start-date")?.value || "").trim();
+    const endDate = String(el("sync-end-date")?.value || "").trim();
+    if (!startDate || !endDate) {
+      showToast("Please select both start and end date for custom range", "error");
+      return;
+    }
+    if (startDate > endDate) {
+      showToast("Start date cannot be after end date", "error");
+      return;
+    }
+    payload.start_date = startDate;
+    payload.end_date = endDate;
+    rangeLabel = `${startDate} to ${endDate}`;
+  }
+
+  btn.disabled = true;
+  statusEl.textContent = `Starting sync (${rangeLabel})...`;
+
+  try {
+    const data = await apiFetch("/api/sync-classroom", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    const runningLabel =
+      data.days === "custom" && data.start_date && data.end_date
+        ? `${data.start_date} to ${data.end_date}`
+        : `window=${data.days}`;
+    statusEl.textContent = `Sync running (${runningLabel})...`;
+    _syncPollTimer = setInterval(pollClassroomSyncStatus, 2000);
+    await pollClassroomSyncStatus();
+  } catch (err) {
+    statusEl.textContent = "Sync error: " + err.message;
+    btn.disabled = false;
+  }
+}
+
+async function pollClassroomSyncStatus() {
+  const btn = el("btn-sync-classroom");
+  const statusEl = el("sync-classroom-status");
+  if (!btn || !statusEl) return;
+
+  try {
+    const data = await apiFetch("/api/sync-classroom/status");
+
+    if (data.status === "running" || data.status === "queued") {
+      statusEl.textContent = data.message || "Sync running...";
+      return;
+    }
+
+    clearInterval(_syncPollTimer);
+    _syncPollTimer = null;
+    btn.disabled = false;
+
+    if (data.status === "done") {
+      statusEl.textContent = data.message || "Sync complete";
+      const added = Number(data.stats?.submissions_added || 0);
+      const updated = Number(data.stats?.submissions_updated || 0);
+      showToast(
+        `Classroom sync complete: ${fmtNum(added)} added, ${fmtNum(updated)} updated`
+      );
+      await refreshAll();
+    } else if (data.status === "error") {
+      statusEl.textContent = data.message || "Sync failed";
+      showToast(`Sync failed: ${data.message || "unknown error"}`, "error");
+    } else {
+      statusEl.textContent = data.message || "";
+    }
+  } catch (err) {
+    clearInterval(_syncPollTimer);
+    _syncPollTimer = null;
+    btn.disabled = false;
+    statusEl.textContent = "Status check failed: " + err.message;
   }
 }
 

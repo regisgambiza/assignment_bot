@@ -159,4 +159,11 @@ Main features:
   - Scheduled jobs are auto-processed by the dashboard worker
   - `Run Due Now` button can trigger immediate sending
 - Maintenance actions (backup, schema init, summary rebuild)
+- Maintenance -> Google Classroom Sync (background, non-blocking)
 - CSV export for learners and pending reports
+
+Optional `.env` keys for Classroom sync:
+- `GOOGLE_CLASSROOM_CREDENTIALS_FILE` (default: `learner_data_writer/client_secrets.json`)
+- `GOOGLE_CLASSROOM_TOKEN_FILE` (default: `learner_data_writer/token.json`)
+- `CLASSROOM_SYNC_SCHOOL_NAME` (default: `School`)
+- `CLASSROOM_SYNC_SOURCE` (default: `google_classroom_sync`)

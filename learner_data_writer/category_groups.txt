@@ -1,0 +1,204 @@
+Course: 7/1 Mathematics (778493437606)
+========================================
+Needs Review:
+ - Athipol Kositatsawapol
+ - Natchamon Makawan
+ - Punyaporn Chewprecha
+ - Ramida Teptoranintra
+ - Urassaya Saensukjaidee
+ - Prima Jitwongtrakul
+ - Juthamas Nilphang-Nga
+ - Phattharawadee Nantiyapradis
+ - Pannatorn Ruengjitchatchawalya
+ - Rinradee Sangaramrungroj
+ - Nantapin Lee
+ - Natthaweeranan Techaswong
+ - Patrick Smits
+ - Thanadech Sae-Jang
+ - Phuncharat Kongnirattusaikul
+ - Peeranut Pakpho
+ - Dayton Sirawit Yeo
+ - Phudhit Swadevinijchai
+ - Klakoon Younglure
+ - Arkira Anuttaraumphi
+
+At Risk:
+ - Jacob Phanudet Briffa
+
+Course: 7/2 Mathematics (778494736270)
+========================================
+Needs Review:
+ - Piriya Nilluang
+ - Asia Muangsuwan Oren
+ - Chanikarn Hiruntrakul
+ - Hana Yoshizawa
+ - Pasasi Viboolchan
+ - Kawintida Yamauchi
+ - Jasmine Fagel
+ - Ghunyahphan Phattharakasemsi
+ - Chatsorn Limchinnachot
+ - Melissa Meena Tilley
+ - Alis Chokpitakkul
+ - Napatsanan Pinitsuwan
+ - Warapada Eakbuse
+ - Pukkawat Serilertwong
+ - Siqi Pan
+ - Supakorn Amradee
+ - Thane Wongyaanava
+ - Alex Myers Kobhirankul
+ - Jin Young Im
+ - Xinhai Lu
+
+Improving:
+ - Kornkawin Chariratanaprakorn
+ - Intouch Jirathanasin
+
+At Risk:
+ - Touchdham Boonma
+
+Course: 7/3 Mathematics (761008786145)
+========================================
+Needs Review:
+ - Paphada Ogushi
+ - Rose Tanjai Hotchin
+ - Fu Yin
+ - Patchanan Songkram
+ - Natthasiri Sirijindapan
+ - Vivitorn Tangngamchit
+ - Shine Kijthanacharoen
+ - Krittikan Saenpuang
+ - Naruedee Staknaruepol
+ - Irisa Preechaweerakul
+ - Waritnont Srikaraket
+ - Napaskorn Chawnafang
+ - Ranont Teonugul
+ - Khatathep Maichan
+ - Supagorn Wititworakul
+ - Neelkamal Matta
+
+At Risk:
+ - Pimpassakorn Chotikanta
+ - Panicha Laohakunakorn
+ - Paritporn Uppakul
+ - Nydcha Santhanthana
+
+Average:
+ - Leon Martynov
+ - Pateepat Jongjaroenmunkong
+ - Paphawin Panmongkon
+ - Janyawatt Jirathanachote
+ - Nonnathee Vongrat
+
+Course: 8/1 Mathematics (778493924097)
+========================================
+Needs Review:
+ - Natcharat Leelamasavat
+ - Sunattaya Promfang
+ - Rungtiwa Sangsawangwatana
+ - Charlene Mae Hiruntrakul
+ - Ornpailin Limpiphiphatn
+ - Chutanudda Nielsen
+ - Lena Sombatwong
+ - Mana Bumpenwarodom
+ - Punnaphat Janesukhum
+ - Phimchaya Charoenkit
+ - Chi En Liu
+ - Varinda Younglure
+ - Sirikwan Jenkriengkrai
+ - Waranya Fueangfu
+ - Yuna Ochi
+ - Sina Mohammadzadeh
+ - Prann Pumprao
+ - Nattaphat Tinprakasmas
+ - Chinawut Kiatchertsaengsuk
+ - Thananon Kijjathon
+
+Average:
+ - KANIDA PANITCHAPAN
+ - Chanut Nongphue
+ - Chonnatan Cheevachuen
+
+Improving:
+ - Royston Tanthai Hotchin
+ - Lippakorn Arwatchanakarn
+ - Euaunggun Kongnirattisaiyakul
+ - Titus Chidkrua
+
+Emerging:
+ - Krisakorn Sae-Jang
+ - Noppasindhu Pholpoke
+
+Course: 8/2 Mathematics (778493744439)
+========================================
+Needs Review:
+ - Nontawat Lertchaiprasert
+ - Amelia Monk
+ - Thiyada Dawao
+ - Chalinthip Sae-Wong
+ - Sirin Benjamahakit
+ - Mayra Booncharoen
+ - Phutthanapat Patthum
+ - Parin Muangon
+ - Phattara Mongkontanasiri
+ - Rich Paniyasakun
+ - Natsiwat Asawapisitkul
+ - Haruto Ito
+ - Nawin Wannaparhun
+ - Umarin Roekmongkhonwit
+ - Apivit Sivasri
+ - Shitipat Samana
+ - Keith Russell
+ - Punnathorn Wisutmetheekorn
+ - Yotam Mahatthanamongkon
+ - Bovornwit Nookaew
+
+Average:
+ - Thanida Butsakorn
+ - Patdharapiti Sawasdee
+ - Thakorn Dechopol
+
+At Risk:
+ - Sukita Phangphithak
+
+Improving:
+ - Sherraan Yotanasakulwong
+
+Emerging:
+ - Saranporn Nuprik
+
+Course: 8/2 Mathematics (778493744439)
+========================================
+Needs Review:
+ - Nontawat Lertchaiprasert
+ - Amelia Monk
+ - Thiyada Dawao
+ - Chalinthip Sae-Wong
+ - Sirin Benjamahakit
+ - Mayra Booncharoen
+ - Phutthanapat Patthum
+ - Parin Muangon
+ - Phattara Mongkontanasiri
+ - Rich Paniyasakun
+ - Shitipat Samana
+ - Keith Russell
+ - Punnathorn Wisutmetheekorn
+ - Yotam Mahatthanamongkon
+ - Bovornwit Nookaew
+
+Average:
+ - Thanida Butsakorn
+ - Sukita Phangphithak
+ - Patdharapiti Sawasdee
+ - Thakorn Dechopol
+
+Improving:
+ - Sherraan Yotanasakulwong
+ - Saranporn Nuprik
+ - Natsiwat Asawapisitkul
+ - Haruto Ito
+
+At Risk:
+ - Nawin Wannaparhun
+ - Umarin Roekmongkhonwit
+ - Apivit Sivasri
+

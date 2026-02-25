@@ -285,6 +285,36 @@
             <button id="btn-maint-schema" class="btn btn-ghost danger">Initialize Schema</button>
           </div>
           <p class="hint">Schema init re-runs `database/schema.sql` and should be used with care.</p>
+
+          <div class="panel-head maintenance-subhead">
+            <h2>Google Classroom Sync</h2>
+          </div>
+          <div class="action-grid sync-controls">
+            <label class="sync-period-field">
+              Time Period
+              <select id="sync-period" class="btn btn-ghost sync-period-select">
+                <option value="7">Last 7 days</option>
+                <option value="30" selected>Last 30 days</option>
+                <option value="90">Last 90 days</option>
+                <option value="180">Last 6 months</option>
+                <option value="all">All time</option>
+                <option value="custom">Custom range</option>
+              </select>
+            </label>
+            <div id="sync-custom-range" class="sync-custom-range hidden">
+              <label class="sync-date-field">
+                Start date
+                <input id="sync-start-date" type="date" class="sync-date-input" />
+              </label>
+              <label class="sync-date-field">
+                End date
+                <input id="sync-end-date" type="date" class="sync-date-input" />
+              </label>
+            </div>
+            <button id="btn-sync-classroom" class="btn btn-primary">&#8635; Sync from Classroom</button>
+            <span id="sync-classroom-status" class="sync-status"></span>
+          </div>
+          <p class="hint">Fetches learner data from Google Classroom and updates the database. Runs in the background.</p>
         </article>
 
         <article class="card">

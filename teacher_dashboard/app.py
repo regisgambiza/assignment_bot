@@ -1631,6 +1631,159 @@ def api_export_reports_csv():
     )
 
 
+# ── Google Classroom sync state ─────────────────────────────────────────────
+
+_sync_state: dict[str, Any] = {
+    "status": "idle",
+    "message": "",
+    "days": "30",
+    "start_date": None,
+    "end_date": None,
+    "stats": None,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
+_sync_lock = threading.Lock()
+_sync_allowed_days = {"7", "30", "90", "180", "all", "custom"}
+
+
+def _normalize_sync_days(raw: Any) -> str:
+    value = str(raw or "30").strip().lower()
+    if value not in _sync_allowed_days:
+        raise ValueError("days must be one of: 7, 30, 90, 180, all, custom")
+    return value
+
+
+def _normalize_date(raw: Any, field_name: str) -> str:
+    value = str(raw or "").strip()
+    if not value:
+        raise ValueError(f"{field_name} is required when days=custom")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be YYYY-MM-DD") from exc
+    return parsed.date().isoformat()
+
+
+def _run_classroom_sync(days: str, start_date: str | None = None, end_date: str | None = None) -> None:
+    global _sync_state
+
+    started_at = datetime.now().isoformat()
+    range_label = (
+        f"{start_date} to {end_date}"
+        if days == "custom" and start_date and end_date
+        else f"window={days}"
+    )
+    with _sync_lock:
+        _sync_state = {
+            "status": "running",
+            "message": f"Syncing classroom data ({range_label})...",
+            "days": days,
+            "start_date": start_date,
+            "end_date": end_date,
+            "stats": None,
+            "error": None,
+            "started_at": started_at,
+            "finished_at": None,
+        }
+
+    try:
+        from sync.learner_data import sync_all_learners
+
+        result = sync_all_learners(
+            days=days,
+            start_date=start_date,
+            end_date=end_date,
+            db_path=DB_PATH,
+            schema_path=BASE_DIR / "database" / "schema.sql",
+        )
+
+        with _sync_lock:
+            _sync_state = {
+                "status": "done",
+                "message": str(result.get("message") or "Sync complete"),
+                "days": days,
+                "start_date": start_date,
+                "end_date": end_date,
+                "stats": result.get("stats"),
+                "error": None,
+                "started_at": started_at,
+                "finished_at": datetime.now().isoformat(),
+            }
+    except Exception as exc:
+        with _sync_lock:
+            _sync_state = {
+                "status": "error",
+                "message": str(exc),
+                "days": days,
+                "start_date": start_date,
+                "end_date": end_date,
+                "stats": None,
+                "error": str(exc),
+                "started_at": started_at,
+                "finished_at": datetime.now().isoformat(),
+            }
+
+
+@app.route("/api/sync-classroom", methods=["POST"])
+def api_sync_classroom():
+    global _sync_state
+
+    body = request.get_json(silent=True) or {}
+    try:
+        days = _normalize_sync_days(body.get("days", "30"))
+        start_date = None
+        end_date = None
+        if days == "custom":
+            start_date = _normalize_date(body.get("start_date"), "start_date")
+            end_date = _normalize_date(body.get("end_date"), "end_date")
+            if start_date > end_date:
+                return _json_error("start_date cannot be after end_date", 400)
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+
+    queue_label = f"{start_date} to {end_date}" if days == "custom" else f"window={days}"
+
+    with _sync_lock:
+        if _sync_state.get("status") in {"queued", "running"}:
+            return _json_error("Sync already in progress", 409)
+        _sync_state = {
+            "status": "queued",
+            "message": f"Sync queued ({queue_label})...",
+            "days": days,
+            "start_date": start_date,
+            "end_date": end_date,
+            "stats": None,
+            "error": None,
+            "started_at": datetime.now().isoformat(),
+            "finished_at": None,
+        }
+
+    worker = threading.Thread(
+        target=_run_classroom_sync,
+        args=(days, start_date, end_date),
+        daemon=True,
+    )
+    worker.start()
+    return _json_ok(
+        {
+            "status": "started",
+            "days": days,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "Classroom sync started",
+    )
+
+
+@app.route("/api/sync-classroom/status")
+def api_sync_classroom_status():
+    with _sync_lock:
+        snapshot = dict(_sync_state)
+    return _json_ok(snapshot)
+
+
 def run():
     _ensure_campaign_worker()
     app.run(host="127.0.0.1", port=8787, debug=True)
