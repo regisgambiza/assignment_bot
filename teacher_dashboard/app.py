@@ -29,6 +29,12 @@ DB_PATH = DB_PATH.resolve()
 
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 DEFAULT_AT_RISK_THRESHOLD = 3
+CLASSROOM_SCOPES = [
+    "https://www.googleapis.com/auth/classroom.courses.readonly",
+    "https://www.googleapis.com/auth/classroom.rosters.readonly",
+    "https://www.googleapis.com/auth/classroom.student-submissions.students.readonly",
+    "https://www.googleapis.com/auth/classroom.student-submissions.me.readonly",
+]
 
 CAMPAIGN_TEMPLATES: dict[str, str] = {
     "gentle": (
@@ -114,6 +120,87 @@ def _json_ok(data: Any = None, message: str | None = None):
 
 def _json_error(message: str, status_code: int = 400):
     return jsonify({"ok": False, "error": message}), status_code
+
+
+def _resolve_classroom_credentials_path() -> Path:
+    configured = (os.getenv("GOOGLE_CLASSROOM_CREDENTIALS_FILE") or "").strip()
+    candidates = [BASE_DIR / "learner_data_writer" / "client_secret.json"]
+
+    if configured:
+        configured_path = Path(configured)
+        if not configured_path.is_absolute():
+            configured_path = BASE_DIR / configured_path
+        candidates.append(configured_path)
+
+    candidates.extend(
+        [
+            BASE_DIR / "learner_data_writer" / "client_secrets.json",
+            BASE_DIR / "learner_data_writer" / "credentials.json",
+            BASE_DIR / "credentials.json",
+        ]
+    )
+
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved.exists():
+            return resolved
+
+    return (BASE_DIR / "learner_data_writer" / "client_secret.json").resolve()
+
+
+def _resolve_classroom_token_path() -> Path:
+    configured = (os.getenv("GOOGLE_CLASSROOM_TOKEN_FILE") or "").strip()
+    if configured:
+        path = Path(configured)
+        if not path.is_absolute():
+            path = BASE_DIR / path
+        return path.resolve()
+    return (BASE_DIR / "learner_data_writer" / "token.json").resolve()
+
+
+def _run_classroom_browser_auth() -> dict[str, Any]:
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError as exc:
+        raise RuntimeError(
+            "Google auth dependencies are missing. Install learner_data_writer requirements first."
+        ) from exc
+
+    credentials_path = _resolve_classroom_credentials_path()
+    token_path = _resolve_classroom_token_path()
+    if not credentials_path.exists():
+        raise FileNotFoundError(
+            "Google OAuth client file not found. Expected "
+            f"{credentials_path} (or set GOOGLE_CLASSROOM_CREDENTIALS_FILE)."
+        )
+
+    creds = None
+    if token_path.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(token_path), CLASSROOM_SCOPES)
+        except Exception:
+            creds = None
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(credentials_path),
+                CLASSROOM_SCOPES,
+            )
+            creds = flow.run_local_server(port=0, open_browser=True)
+
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(creds.to_json(), encoding="utf-8")
+
+    return {
+        "credentials_file": str(credentials_path),
+        "token_file": str(token_path),
+        "scopes": CLASSROOM_SCOPES,
+    }
 
 
 def _fetch_courses(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -1632,6 +1719,19 @@ def api_export_reports_csv():
 
 
 # ── Google Classroom sync state ─────────────────────────────────────────────
+
+@app.route("/api/classroom-auth", methods=["POST"])
+def api_classroom_auth():
+    try:
+        data = _run_classroom_browser_auth()
+        return _json_ok(data, "Google Classroom authentication complete")
+    except FileNotFoundError as exc:
+        return _json_error(str(exc), 404)
+    except RuntimeError as exc:
+        return _json_error(str(exc), 500)
+    except Exception as exc:
+        return _json_error(f"Google authentication failed: {exc}", 500)
+
 
 _sync_state: dict[str, Any] = {
     "status": "idle",

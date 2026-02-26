@@ -189,6 +189,7 @@ function setupSectionActions() {
   el("btn-maint-rebuild").addEventListener("click", rebuildSummaries);
   el("btn-maint-schema").addEventListener("click", initSchema);
   el("btn-sync-refresh").addEventListener("click", refreshSyncLog);
+  el("btn-classroom-auth")?.addEventListener("click", startClassroomAuth);
   el("btn-sync-classroom")?.addEventListener("click", startClassroomSync);
   el("sync-period")?.addEventListener("change", toggleSyncCustomRange);
   toggleSyncCustomRange();
@@ -1057,8 +1058,9 @@ async function pollClassroomSyncStatus() {
       statusEl.textContent = data.message || "Sync complete";
       const added = Number(data.stats?.submissions_added || 0);
       const updated = Number(data.stats?.submissions_updated || 0);
+      const deleted = Number(data.stats?.assignments_deleted || 0);
       showToast(
-        `Classroom sync complete: ${fmtNum(added)} added, ${fmtNum(updated)} updated`
+        `Classroom sync complete: ${fmtNum(added)} added, ${fmtNum(updated)} updated, ${fmtNum(deleted)} activities removed`
       );
       await refreshAll();
     } else if (data.status === "error") {
@@ -1072,6 +1074,36 @@ async function pollClassroomSyncStatus() {
     _syncPollTimer = null;
     btn.disabled = false;
     statusEl.textContent = "Status check failed: " + err.message;
+  }
+}
+
+async function startClassroomAuth() {
+  const authBtn = el("btn-classroom-auth");
+  const syncBtn = el("btn-sync-classroom");
+  const statusEl = el("sync-classroom-status");
+  if (!authBtn || !statusEl) return;
+  if (_syncPollTimer) {
+    showToast("Sync is currently running. Wait for it to finish first.", "error");
+    return;
+  }
+
+  authBtn.disabled = true;
+  if (syncBtn) syncBtn.disabled = true;
+  statusEl.textContent = "Opening Google authentication in browser...";
+
+  try {
+    const data = await apiFetch("/api/classroom-auth", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    statusEl.textContent = `Authentication complete. Token saved to ${data.token_file || "token.json"}`;
+    showToast("Google authentication complete");
+  } catch (err) {
+    statusEl.textContent = "Authentication failed: " + err.message;
+    showToast("Authentication failed: " + err.message, "error");
+  } finally {
+    authBtn.disabled = false;
+    if (syncBtn) syncBtn.disabled = false;
   }
 }
 

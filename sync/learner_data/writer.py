@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from sync.learner_data.classroom import get_all_courses, get_classroom_service
+from sync.learner_data.classroom import get_all_courses, get_all_coursework, get_classroom_service
 from sync.learner_data.settings import (
     classroom_school_name,
     classroom_sync_source,
@@ -16,6 +17,7 @@ from sync.learner_data.settings import (
 )
 
 ALLOWED_DAY_WINDOWS = {"7", "30", "90", "180", "all", "custom"}
+logger = logging.getLogger("classroom_sync")
 
 
 @dataclass
@@ -30,6 +32,7 @@ class SyncTotals:
     enrollments_added: int = 0
     assignments_added: int = 0
     assignments_updated: int = 0
+    assignments_deleted: int = 0
     submissions_added: int = 0
     submissions_updated: int = 0
     summaries_upserted: int = 0
@@ -43,6 +46,7 @@ class SyncTotals:
         self.enrollments_added += _to_int(stats.get("enrollments_added"))
         self.assignments_added += _to_int(stats.get("assignments_added"))
         self.assignments_updated += _to_int(stats.get("assignments_updated"))
+        self.assignments_deleted += _to_int(stats.get("assignments_deleted"))
         self.submissions_added += _to_int(stats.get("submissions_added"))
         self.submissions_updated += _to_int(stats.get("submissions_updated"))
         self.summaries_upserted += _to_int(stats.get("summaries_upserted"))
@@ -180,6 +184,24 @@ def sync_all_learners(
             )
             continue
 
+        active_assignment_lms_ids: set[str] | None = None
+        if normalized_days != "all":
+            try:
+                active_assignment_lms_ids = {
+                    assignment_id
+                    for assignment_id in (
+                        str(cw.get("id", "")).strip()
+                        for cw in get_all_coursework(service, str(course.get("id", "")))
+                    )
+                    if assignment_id
+                }
+            except Exception:
+                logger.warning(
+                    "Failed to fetch full coursework list for cleanup in course=%s",
+                    course.get("id"),
+                    exc_info=True,
+                )
+
         sync_stats = sync_course_analysis_to_db(
             course=course,
             student_analysis=analysis,
@@ -188,6 +210,9 @@ def sync_all_learners(
             school_name=school,
             source=source_tag,
             dry_run=False,
+            start_date=start_date,
+            end_date=end_date,
+            active_assignment_lms_ids=active_assignment_lms_ids,
         )
         totals.courses_synced += 1
         totals.apply_course_stats(sync_stats)
@@ -204,6 +229,7 @@ def sync_all_learners(
     stats = asdict(totals)
     message = (
         f"Synced {stats['courses_synced']} course(s); "
+        f"assignments deleted={stats['assignments_deleted']}, "
         f"submissions added={stats['submissions_added']}, "
         f"updated={stats['submissions_updated']}."
     )

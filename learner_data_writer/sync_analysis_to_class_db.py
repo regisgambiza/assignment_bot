@@ -185,6 +185,55 @@ def _upsert_assignments(
     return db_ids
 
 
+def _delete_stale_assignments(
+    conn: sqlite3.Connection,
+    course_id: int,
+    active_assignment_lms_ids: set[str],
+    stats: Dict[str, int],
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> int:
+    where = ["course_id = ?"]
+    params: list[object] = [course_id]
+
+    # On partial syncs, only prune assignments within the selected window.
+    if start_date:
+        where.append("date(COALESCE(created_at, '1970-01-01')) >= date(?)")
+        params.append(start_date)
+    if end_date:
+        where.append("date(COALESCE(created_at, '1970-01-01')) <= date(?)")
+        params.append(end_date)
+
+    if active_assignment_lms_ids:
+        placeholders = ", ".join("?" for _ in active_assignment_lms_ids)
+        where.append(f"lms_id NOT IN ({placeholders})")
+        params.extend(sorted(active_assignment_lms_ids))
+
+    rows = conn.execute(
+        f"SELECT id FROM assignments WHERE {' AND '.join(where)}",
+        tuple(params),
+    ).fetchall()
+    if not rows:
+        return 0
+
+    assignment_ids = [int(row["id"]) for row in rows]
+    placeholders = ", ".join("?" for _ in assignment_ids)
+    conn.execute(
+        f"DELETE FROM assignments WHERE id IN ({placeholders})",
+        tuple(assignment_ids),
+    )
+    stats["assignments_deleted"] += len(assignment_ids)
+    logger.info(
+        "Deleted %d stale assignment(s) for course_id=%s (start=%s, end=%s)",
+        len(assignment_ids),
+        course_id,
+        start_date,
+        end_date,
+    )
+    return len(assignment_ids)
+
+
 def _compute_submission_status_and_score(cw: Dict) -> Dict[str, Optional[object]]:
     submission = cw.get("submission")
     max_points = cw.get("maxPoints")
@@ -412,6 +461,9 @@ def sync_course_analysis_to_db(
     school_name: str = "School",
     source: str = "learner_performance_monitor_direct",
     dry_run: bool = False,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    active_assignment_lms_ids: set[str] | None = None,
 ) -> Dict[str, int]:
     """
     Sync one analysed course directly to class.db without reading report files.
@@ -426,6 +478,7 @@ def sync_course_analysis_to_db(
             "enrollments_added": 0,
             "assignments_added": 0,
             "assignments_updated": 0,
+            "assignments_deleted": 0,
             "submissions_added": 0,
             "submissions_updated": 0,
             "summaries_upserted": 0,
@@ -447,6 +500,7 @@ def sync_course_analysis_to_db(
         "enrollments_added": 0,
         "assignments_added": 0,
         "assignments_updated": 0,
+        "assignments_deleted": 0,
         "submissions_added": 0,
         "submissions_updated": 0,
         "summaries_upserted": 0,
@@ -473,6 +527,19 @@ def sync_course_analysis_to_db(
 
         assignment_map = _build_assignment_map(student_analysis)
         assignment_db_ids = _upsert_assignments(conn, course_id, assignment_map, stats)
+        assignment_ids_for_cleanup = (
+            active_assignment_lms_ids if active_assignment_lms_ids is not None else set(assignment_map.keys())
+        )
+        cleanup_start_date = None if active_assignment_lms_ids is not None else start_date
+        cleanup_end_date = None if active_assignment_lms_ids is not None else end_date
+        _delete_stale_assignments(
+            conn=conn,
+            course_id=course_id,
+            active_assignment_lms_ids=assignment_ids_for_cleanup,
+            stats=stats,
+            start_date=cleanup_start_date,
+            end_date=cleanup_end_date,
+        )
 
         for sid, data in student_analysis.items():
             profile = data["student"].get("profile", {})
@@ -516,7 +583,10 @@ def sync_course_analysis_to_db(
                 source,
                 stats["submissions_added"],
                 stats["submissions_updated"],
-                f"direct_sync course={course.get('name')} students={len(student_analysis)}",
+                (
+                    f"direct_sync course={course.get('name')} students={len(student_analysis)} "
+                    f"assignments_deleted={stats['assignments_deleted']}"
+                ),
             ),
         )
         stats["sync_logs_added"] += 1
@@ -527,11 +597,12 @@ def sync_course_analysis_to_db(
         else:
             conn.commit()
             logger.info(
-                "Direct DB sync committed for course=%s (%s). submissions_added=%d submissions_updated=%d",
+                "Direct DB sync committed for course=%s (%s). submissions_added=%d submissions_updated=%d assignments_deleted=%d",
                 course.get("name"),
                 course.get("id"),
                 stats["submissions_added"],
                 stats["submissions_updated"],
+                stats["assignments_deleted"],
             )
     except Exception:
         conn.rollback()
