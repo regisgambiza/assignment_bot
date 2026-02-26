@@ -3,6 +3,7 @@ bot/handlers/teacher.py
 
 Teacher-only commands and workflows:
   /teacher     - teacher panel
+  /stats       - lookup learner stats by name
   /pending     - review flagged submissions
   /atrisk      - at-risk learner list
   /broadcast   - missing work reminder blast
@@ -15,11 +16,14 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 
-from telegram import Update, Bot, InlineKeyboardMarkup
+from telegram import Update, Bot, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from database.db import (
+    find_students_by_name,
+    get_summary,
+    get_student_course_name,
     get_pending_flags,
     get_at_risk_students,
     get_all_students_with_telegram,
@@ -84,6 +88,118 @@ def _campaign_template_preview(template: str) -> str:
     return sample[:600]
 
 
+def _split_text_chunks(text: str, limit: int = 3900) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at <= 0:
+            split_at = limit
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip("\n")
+    return chunks
+
+
+async def _reply_teacher_student_stats(message, student: dict) -> None:
+    chunks = _split_text_chunks(_format_teacher_student_stats(student))
+    await message.reply_text(chunks[0])
+    for chunk in chunks[1:]:
+        await message.reply_text(chunk)
+
+
+async def _edit_teacher_student_stats(query, student: dict) -> None:
+    chunks = _split_text_chunks(_format_teacher_student_stats(student))
+    await query.edit_message_text(chunks[0])
+    for chunk in chunks[1:]:
+        await query.message.reply_text(chunk)
+
+
+def _format_teacher_student_stats(student: dict) -> str:
+    summary = get_summary(student["id"])
+    course_name = get_student_course_name(student["id"]) or "Unknown class"
+    telegram_id = student.get("telegram_id") or "-"
+    telegram_username = student.get("telegram_username")
+    telegram_label = (
+        f"{telegram_id} (@{telegram_username})" if telegram_username else str(telegram_id)
+    )
+
+    lines = [
+        f"Learner: {student.get('full_name', '-')}",
+        f"LMS ID: {student.get('lms_id', '-')}",
+        f"Course: {course_name}",
+        f"Telegram: {telegram_label}",
+    ]
+
+    if not summary:
+        lines.append("")
+        lines.append("No summary data yet for this learner.")
+        return "\n".join(lines)
+
+    total_assigned = int(summary.get("total_assigned") or 0)
+    total_missing = int(summary.get("total_missing") or 0)
+    total_submitted = summary.get("total_submitted")
+    if total_submitted is None:
+        total_submitted = max(total_assigned - total_missing, 0)
+
+    points_earned = float(summary.get("points_earned") or 0.0)
+    points_possible = float(summary.get("points_possible") or 0.0)
+    overall_avg = (
+        (points_earned * 100.0 / points_possible) if points_possible > 0 else 0.0
+    )
+    completion_pct = (
+        round((float(total_submitted) / float(total_assigned)) * 100)
+        if total_assigned > 0
+        else 0
+    )
+
+    lines.extend(
+        [
+            "",
+            "Stats:",
+            f"- Assigned: {total_assigned}",
+            f"- Submitted: {int(total_submitted)}",
+            f"- Missing: {total_missing}",
+            f"- Late: {int(summary.get('total_late') or 0)}",
+            f"- Average: {overall_avg:.2f}%",
+            f"- Points: {points_earned:.2f}/{points_possible:.2f}",
+            f"- Completion: {completion_pct}%",
+        ]
+    )
+
+    missing = get_missing_work(student["id"])
+    if missing:
+        lines.append("")
+        lines.append(f"Missing work ({len(missing)}):")
+        for idx, item in enumerate(missing, 1):
+            lines.append(f"{idx}. {item['title']}")
+    else:
+        lines.append("")
+        lines.append("Missing work: none")
+
+    return "\n".join(lines)
+
+
+def _teacher_stats_match_kb(students: list[dict]) -> InlineKeyboardMarkup:
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for student in students:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    student.get("full_name", "Unknown learner")[:64],
+                    callback_data=f"teacher_stats_pick_{student['id']}",
+                )
+            ]
+        )
+    keyboard.append([InlineKeyboardButton("Cancel", callback_data="teacher_stats_cancel")])
+    return InlineKeyboardMarkup(keyboard)
+
+
 def _resolve_schedule(token: str) -> tuple[datetime, str]:
     now = datetime.now()
     if token == "now":
@@ -138,6 +254,7 @@ async def teacher_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Pending flags: *{len(pending)}*\n"
         f"At-risk learners: *{len(at_risk)}*\n\n"
         "Commands:\n"
+        "/stats     - lookup learner stats by name\n"
         "/pending   - review flagged submissions\n"
         "/atrisk    - list at-risk learners\n"
         "/broadcast - send missing-work reminders now\n"
@@ -145,6 +262,23 @@ async def teacher_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/campaigns - recent campaign jobs\n"
         "/links     - generate registration links",
         parse_mode="Markdown",
+    )
+
+
+async def learner_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_teacher(update.effective_user.id):
+        await _deny_access(update)
+        return
+
+    # Prevent registration flow from consuming teacher name lookups.
+    context.user_data.pop("state", None)
+    context.user_data.pop("candidates", None)
+    context.user_data.pop("pending_lms_id", None)
+    context.user_data.pop("pending_name", None)
+    context.user_data["teacher_state"] = "awaiting_teacher_stats_query"
+    await update.message.reply_text(
+        "Send learner name to lookup stats.\n"
+        "You can type part of the name (example: Maria)."
     )
 
 
@@ -383,7 +517,33 @@ async def handle_teacher_text_input(
     if not _is_teacher(update.effective_user.id):
         return False
 
-    if context.user_data.get("teacher_state") != "awaiting_campaign_custom":
+    state = context.user_data.get("teacher_state")
+    if state == "awaiting_teacher_stats_query":
+        query_text = (update.message.text or "").strip()
+        if len(query_text) < 2:
+            await update.message.reply_text("Please enter at least 2 characters.")
+            return True
+
+        matches = find_students_by_name(query_text)
+        if not matches:
+            await update.message.reply_text(
+                "No learner found with that name. Try another search."
+            )
+            return True
+
+        if len(matches) == 1:
+            context.user_data.pop("teacher_state", None)
+            await _reply_teacher_student_stats(update.message, matches[0])
+            return True
+
+        top_matches = matches[:15]
+        await update.message.reply_text(
+            f"Found {len(matches)} learners. Select one:",
+            reply_markup=_teacher_stats_match_kb(top_matches),
+        )
+        return True
+
+    if state != "awaiting_campaign_custom":
         return False
 
     template_text = (update.message.text or "").strip()
@@ -412,6 +572,41 @@ async def handle_teacher_buttons(
 ) -> bool:
     query = update.callback_query
     data = query.data
+
+    if data == "teacher_stats_cancel":
+        if not _is_teacher(query.from_user.id):
+            await query.answer("Teacher only", show_alert=True)
+            return True
+        await query.answer()
+        context.user_data.pop("teacher_state", None)
+        await query.edit_message_text("Learner stats lookup cancelled.")
+        return True
+
+    if data.startswith("teacher_stats_pick_"):
+        if not _is_teacher(query.from_user.id):
+            await query.answer("Teacher only", show_alert=True)
+            return True
+
+        await query.answer()
+        try:
+            student_id = int(data.replace("teacher_stats_pick_", "", 1))
+        except ValueError:
+            await query.edit_message_text("Invalid learner selection.")
+            return True
+
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT * FROM students WHERE id = ?",
+                (student_id,),
+            ).fetchone()
+
+        if not row:
+            await query.edit_message_text("Learner not found.")
+            return True
+
+        context.user_data.pop("teacher_state", None)
+        await _edit_teacher_student_stats(query, dict(row))
+        return True
 
     if data.startswith("verify_"):
         if not _is_teacher(query.from_user.id):

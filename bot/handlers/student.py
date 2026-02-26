@@ -241,10 +241,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from bot.handlers.registration import handle_search_input
     from bot.handlers.teacher import handle_teacher_text_input, notify_teacher_of_flag
 
-    if await handle_search_input(update, context):
+    if await handle_teacher_text_input(update, context):
         return
 
-    if await handle_teacher_text_input(update, context):
+    if await handle_search_input(update, context):
         return
 
     if not update.message:

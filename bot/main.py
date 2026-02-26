@@ -20,6 +20,7 @@ from bot.handlers.student import start, button_handler, message_handler
 from bot.handlers.teacher import (
     teacher_panel, pending_flags, at_risk,
     broadcast, generate_links,
+    learner_stats_command,
     campaign_command, campaign_jobs_command,
     campaign_worker,
 )
@@ -76,6 +77,7 @@ def main():
 
     # â”€â”€ Teacher commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     app.add_handler(CommandHandler("teacher",   teacher_panel))
+    app.add_handler(CommandHandler("stats",     learner_stats_command))
     app.add_handler(CommandHandler("pending",   pending_flags))
     app.add_handler(CommandHandler("atrisk",    at_risk))
     app.add_handler(CommandHandler("broadcast", broadcast))
@@ -104,4 +106,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
